@@ -5,11 +5,13 @@ Designed based on "c4.c - C in four functions" by Robert Swierczek.
 
 # Building
 
+NOTE: currently only does anything on the PC build.
+
 `make` build files for CE family calculators running TIOS
 
 `make -f bos.makefile` build files for CE family calculators running BOS
 
-`make -f pc.makefile` build files for PC
+`make -f pc.makefile` build files for PC (Windows/Linux/MacOS)
 
 # Feature Set
 
