@@ -17,3 +17,7 @@ Integer, string, and character literals including hexadecimal and common escape 
 
 ANSI style functions, with additional syntax to assign an address to a function in the function prototype.
 
+Operator precedence.
+
+Constant folding.
+
