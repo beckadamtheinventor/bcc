@@ -1,0 +1,7 @@
+bin
+obj
+bosbin
+bosobj
+src/*.o
+examples/*.bin
+examples/*.8xp
