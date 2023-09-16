@@ -7,8 +7,8 @@ public _compute_hash
 _compute_hash:
 	ld iy,0
 	add iy,sp
-	ld bc,(iy+9)
-	ld iy,(iy+6)
+	ld bc,(iy+6)
+	ld iy,(iy+3)
 	xor a,a
 	sbc hl,hl
 .loop:

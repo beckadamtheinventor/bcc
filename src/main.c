@@ -23,7 +23,7 @@
 #define _free free
 
 #else
-
+	// CE Specific defines
 #include <tice.h>
 
 #ifdef BOS_BUILD
@@ -36,6 +36,7 @@
 #else
 	// TI-OS Specific defines
 #include <fileioc.h>
+#include <graphx.h>
 
 // Implement similar malloc/free from BOS on TI-OS
 #define __mallocblocksize 16
@@ -73,7 +74,7 @@ void *_malloc(unsigned int amt) {
 		*i++ = 2;
 		k += __mallocblocksize;
 	}
-	return &__mallocmem[j - (uint8_t*)&__mallocalloc];
+	return &__mallocmem[(j - (uint8_t*)&__mallocalloc) * __mallocblocksize];
 }
 
 int _free(uint8_t *ptr) {
@@ -114,13 +115,13 @@ enum {
 	T_STRUCT,
 	T_BOOL,
 	T_STR,
-	T_INLINE_DATA,
 	T_BOOL_CF = 26,
 	T_BOOL_NCF,
 	T_BOOL_ZF,
 	T_BOOL_NZF,
-	T_MASK = 31,
-	T_PTR = 32,
+	T_MASK = 0x1f,
+	T_INLINE_DATA = 0x20,
+	T_PTR = 0x40,
 };
 
 enum {
@@ -208,7 +209,8 @@ enum {
 	IR_BNZ, // branch if non-zero
 	
 	IR_STRLEN, // get strlen of primary register, storing into primary register
-
+	IR_STRCPY, // strcpy(primary, secondary)
+	IR_STORE, // store arg bytes of secondary to address in primary
 	IR_SET_ONE_IF_NOT_ZERO, // set primary to 1 if primary is not zero
 	IR_DEFINE_FUNCTION, // Define function here. arg0 is symbol, arg1 is number of arguments
 
@@ -217,7 +219,7 @@ enum {
 
 enum {
 	TK_NUM = 128, TK_STR, TK_CHAR, TK_DATA, TK_FUN, TK_ID,
-	TK_IF, TK_ELSE, TK_WHILE, TK_DO, TK_ENUM, TK_RETURN, TK_SIZEOF, TK_TYPEDEF, TK_STRUCT,
+	TK_IF, TK_ELSE, TK_WHILE, TK_DO, TK_ENUM, TK_RETURN, TK_SIZEOF, TK_TYPEDEF, TK_STRUCT, TK_INCLUDE,
 	TK_ASSIGN, TK_ADDEQ, TK_SUBEQ, TK_MULEQ, TK_DIVEQ, TK_MODEQ, TK_COND, TK_LOR, TK_LAND, TK_OR, TK_XOR, TK_AND,
 	TK_EQ, TK_NE, TK_LT, TK_GT, TK_LTEQ, TK_GTEQ, TK_SHL, TK_SHR, TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
 	TK_STRUCTPTRACCESS, TK_STRUCTACCESS,
@@ -236,6 +238,7 @@ enum {
 #define sizeof_symbol(name) (strlen(name)+sizeof(symbol))
 typedef struct _symbol {
 	uint8_t symtype, valtype;
+	unsigned int datalen;
 	unsigned int value;
 	uint8_t valueupper;
 	unsigned int resolved_value;
@@ -245,7 +248,7 @@ typedef struct _symbol {
 } symbol;
 
 bool tkisconst = true;
-uint8_t tk, tkvaltype, outformat = FMT_CE, primarytype = T_VOID;
+uint8_t tk, tkvaltype, outformat = FMT_CE;
 symbol *tksym = NULL;
 char *tkname;
 unsigned int tknamelen;
@@ -258,6 +261,7 @@ char *srcdata;
 #define SYM_STACK_SAVE_SIZE 256
 #define _int int32_t
 #define _ptr long long
+#define signext(v) ((v>=0x80000000)?((v)|0xffffffff00000000llu):(v))
 #else
 #define IR_OUTPUT_SIZE 32768
 #define OUTPUT_BUFFER_SIZE 0xFFE8
@@ -266,16 +270,33 @@ char *srcdata;
 #define SYM_STACK_SAVE_SIZE 16
 #define _int int
 #define _ptr unsigned int
+#define signext(v) (v)
 #endif
+
+#define FUNCTION_ARGUMENT_STACK_SIZE 32
+typedef struct _function_argument_stack_item {
+	_ptr *expr, *expr_end
+} function_argument_stack_item;
+function_argument_stack_item function_argument_stack[FUNCTION_ARGUMENT_STACK_SIZE];
+unsigned int function_argument_stack_sp;
 char *tkvalstr;
-int tkval, tkvallen, primary;
-int8_t tkvalupper;
+int32_t tkval;
 _ptr *resolvestack, *resolvestackstart, *expr, *exprstart, *data_start, *data_resolve_stack;
 _int data_resolve_sp = 0;
 uint8_t *out, *outstart;
-unsigned int errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr = TI_pixelShadow, PROGRAM_ORIGIN = TI_userMem;
+unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr = TI_pixelShadow, PROGRAM_ORIGIN = TI_userMem;
 symbol *symtable = NULL;
 symbol **localsymstack = NULL;
+
+#ifndef PLATFORM_DESKTOP
+#ifndef BOS_BUILD
+void console_printline(const char *s) {
+	static uint8_t y = 2;
+	gfx_PrintStringXY(s, 2, y);
+	y += 10;
+}
+#endif
+#endif
 
 void error(const char *s) {
 #ifdef PLATFORM_DESKTOP
@@ -293,12 +314,13 @@ void error(const char *s) {
 	}
 	sys_WaitKeyCycle();
 #else
-	os_HomeUp();
-	os_PutStrFull(s);
+	console_printline(s);
 	if (lno > 0) {
-		printf("Error on line %u\n", lno);
+		console_printline("Error on line");
+		gfx_PrintUInt(lno, 0);
 	}
 	while (!os_GetCSC());
+	gfx_End();
 #endif
 #endif
 	exit(1);
@@ -394,7 +416,7 @@ symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t
 	symtable = sym;
 
 	// copy symbol name
-	memcpy(&sym->name, name, namelen);
+	memcpy(sym->name, name, namelen);
 	sym->name[namelen] = 0;
 	sym->symtype = symtype;
 	sym->valtype = valtype;
@@ -408,19 +430,35 @@ symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t
 	return sym;
 }
 
-symbol *make_tmp_sym(unsigned int val, uint8_t valtype) {
+symbol *make_anon_sym(unsigned int val, uint8_t valtype) {
 	symbol *sym;
-	if ((sym = malloc(sizeof(symbol))) == NULL) {
+	if ((sym = _malloc(sizeof(symbol))) == NULL) {
 		error("Out of memory");
 	}
 	memset(sym, 0, sizeof(symbol));
 	sym->value = val;
 	sym->valtype = valtype;
+	if ((*localsymstack) != NULL) {
+		if ((*localsymstack)->next != NULL) {
+			(*localsymstack)->next->prev = sym;
+			sym->next = (*localsymstack)->next;
+		}
+		(*localsymstack)->next = sym;
+		sym->prev = (*localsymstack);
+		(*localsymstack) = sym;
+	} else if (symtable != NULL) {
+		symtable->next = sym;
+		sym->prev = symtable;
+		symtable = sym;
+	} else {
+		sym->prev = symtable;
+		symtable = sym;
+	}
 	return sym;
 }
 
-symbol *make_tmp_sym_str(unsigned int offset, char *str, unsigned int len) {
-	symbol *sym = make_tmp_sym(offset, T_STR);
+symbol *make_anon_sym_str(unsigned int offset, char *str, unsigned int len) {
+	symbol *sym = make_anon_sym(offset, T_STR);
 #ifdef DEBUG
 	printf("Resolving data later at offset 0x%llX pointer 0x%llX length 0x%X\n", expr-exprstart, (_ptr)ptr, len);
 #endif
@@ -434,26 +472,28 @@ symbol *make_tmp_sym_str(unsigned int offset, char *str, unsigned int len) {
 
 void save_sym_stack(void) {
 	// push to the symbol save stack
-	*localsymstack++ = symtable;
+	*++localsymstack = symtable;
 }
 
 // free sym stack from current down to saved point, pop symbol save stack
 void free_local_symbols(void) {
 	symbol *sym = symtable;
-	symbol *tmp = *--localsymstack;
-	do {
-		// break if we've reached the saved point in the symbol stack
-		if (sym == tmp) {
-			break;
-		}
+	symbol *tmp = *localsymstack--;
+	if (tmp != NULL) {
+		do {
+			// break if we've reached the saved point in the symbol stack
+			if (sym == tmp) {
+				break;
+			}
 #ifdef DEBUG
-		printf("Freeing symbol \"%s\"\n", sym->next->name);
+			printf("Freeing symbol \"%s\"\n", sym->next->name);
 #endif
-		if (sym->next != NULL) {
-			free(sym->next);
-		}
-		sym->next = NULL;
-	} while ((sym = sym->prev) != NULL);
+			if (sym->next != NULL) {
+				free(sym->next);
+			}
+			sym->next = NULL;
+		} while ((sym = sym->prev) != NULL);
+	}
 	symtable = tmp;
 }
 
@@ -463,7 +503,7 @@ symbol *find_sym(const char *name, unsigned int namelen) {
 	symbol *sym = symtable;
 #ifdef DEBUG
 	if (namelen > 0) {
-		char *symname = malloc(namelen+1);
+		char *symname = _malloc(namelen+1);
 		memcpy(symname, name, namelen);
 		symname[namelen] = 0;
 		printf("Searching for symbol \"%s\" with hash %X\n", symname, hash);
@@ -477,7 +517,7 @@ symbol *find_sym(const char *name, unsigned int namelen) {
 #endif
 	if (sym != NULL) {
 		do {
-			// printf("Checking symbol with hash %X\n", sym->hash);
+			// printf("Checking symbol \"%s\" with hash 0x%X at 0x%llX\n", (char*)&sym->name, sym->hash, (long long int)sym);
 			if (hash == sym->hash) {
 				if (!strncmp(name, &sym->name, namelen)) {
 					return sym;
@@ -531,9 +571,8 @@ void tk_next(void) {
 		}
 		tk = getchar();
 	}
-	if (tk && !(tk == ';' || tk == ',' || tk == '~' || tk == ';' || tk == '{' || tk == '}' || tk == '(' || tk == ')' || tk == ']' || tk == ',' || tk == ':')) {
+	if (tk && !(tk == ';' || tk == ',' || tk == '~' || tk == ';' || tk == '{' || tk == '}' || tk == '(' || tk == ')' || tk == '[' || tk == ']' || tk == ',' || tk == ':')) {
 		tk2 = peekchar();
-		tksym = NULL;
 		if (tk == '/' && tk2 == '/') {
 			while (tk && tk != '\n') {
 				tk = getchar();
@@ -564,10 +603,9 @@ void tk_next(void) {
 				tk_next();
 			}
 		} else if (tk == '#') {
-			if (consume_token_line("define")) {
-				return;
-			} else if (consume_token_line("include")) {
-				return;
+			getchar();
+			if (consume_token("include")) {
+				tk = TK_INCLUDE;
 			} else {
 				error("Invalid/unimplemented preprocessor token");
 			}
@@ -760,7 +798,7 @@ void tk_next(void) {
 				}
 			} while (tk2 != '"');
 	//		printf("Got string with length %u\n", srcoffset-i);
-			if ((ptr = malloc(srcoffset-i)) == NULL) {
+			if ((ptr = _malloc(srcoffset-i)) == NULL) {
 				error("Out of memory");
 			}
 			tk = TK_STR;
@@ -799,24 +837,31 @@ void tk_next(void) {
 				}
 			}
 		} else {
+#ifdef PLATFORM_DESKTOP
+			printf("tk = \"%c\" 0x%X\n", tk, tk);
+#endif
 			error("Invalid token");
 		}
 	}
+	// printf("tk = %X \"%c\"\n", tk, tk);
 }
 
 void expression(uint8_t level) {
-	bool primaryisconst = true;
+	bool primaryisconst = true, primaryisptr = false;
+	uint8_t primarytype;
+	int32_t primary;
 	_ptr *d, *tmpexpr = expr;
 	int tmp;
 	symbol *sym;
 
+//	printf("%u\n", lno);
 //	printf("tk = %X tkval = %X\n", tk, tkval);
 	if (!tk) {
 		error("Unexpected EOF");
 	} else if (tk == TK_NUM || tk == TK_STR || tk == TK_DATA || tk == TK_CHAR) {
 		if (tk == TK_STR || tk == TK_DATA) {
 			*++expr = IR_IMM_PROG_OFFSET;
-			*++expr = make_tmp_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+			*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
 			tkisconst = false;
 		} else if ((tkvaltype & T_MASK) == T_LONG) {
 			if (!tkisconst) {
@@ -841,12 +886,25 @@ void expression(uint8_t level) {
 			if (tk != ')') {
 				error("sizeof: Missing closing parenthesis");
 			}
-			if (tkvaltype >= T_PTR) {
+			if (tkvaltype & T_INLINE_DATA) {
+				if (tkvaltype >= T_PTR) {
+					*++expr = IR_IMM;
+					*++expr = 3 * tkvallen;
+				} else if ((tkvaltype & T_MASK) == T_STR) {
+					*++expr = IR_IMM;
+					*++expr = tkvallen;
+				} else if ((tkvaltype & T_MASK) >= T_CHAR && (tkvaltype & T_MASK) <= T_LONG) {
+					*++expr = IR_IMM;
+					*++expr = (tkvaltype & T_MASK) * tkvallen;
+				} else {
+					error("sizeof: Invalid/unsupported or non-constant size value/type");
+				}
+			} else if (tkvaltype >= T_PTR) {
 				*++expr = IR_IMM;
 				*++expr = 3;
 			} else if (tkvaltype == T_STR) {
 				*++expr = IR_IMM_PROG_OFFSET;
-				*++expr = make_tmp_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+				*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
 				*++expr = IR_STRLEN;
 				tkisconst = false;
 			} else if (tkvaltype >= T_CHAR && tkvaltype <= T_LONG) {
@@ -894,54 +952,141 @@ void expression(uint8_t level) {
 				error("can't call non-function value as function");
 			}
 			tk_next();
+			// keep track of argument IR generation start
+			function_argument_stack_sp = 0;
+			function_argument_stack[0].expr = expr;
 			while (tk != ')') {
+				// adding each expression IR start and end to a FILO stack
+				function_argument_stack_sp++;
+				function_argument_stack[function_argument_stack_sp].expr = expr;
 				expression(TK_ASSIGN);
-				if (tkvaltype == T_LONG) {
+				if (tkisconst) {
+					if (tkvaltype == T_LONG) {
+						*++expr = IR_PUSH_IMM_32;
+						*++expr = tkval;
+						*++expr = tkval >> 24;
+						tmp += 6;
+					} else {
+						*++expr = IR_PUSH_IMM;
+						*++expr = tkval;
+						tmp += 3;
+					}
+				} else if (tkvaltype == T_LONG) {
 					*++expr = IR_PUSH_32;
 					tmp += 6;
 				} else {
 					*++expr = IR_PUSH;
 					tmp += 3;
 				}
+				function_argument_stack[function_argument_stack_sp].expr_end = expr;
 				if (tk == ',') { // maybe unnecessary check?
 					tk_next();
 				}
 			}
+			function_argument_stack[0].expr_end = expr;
+			// copy argument expression IR backwards
+			while (function_argument_stack_sp > 0) {
+				_ptr *e = function_argument_stack[function_argument_stack_sp].expr;
+				while (e < function_argument_stack[function_argument_stack_sp].expr_end) {
+					*++expr = *++e;
+				}
+				function_argument_stack_sp--;
+			}
+			// overwrite the forwards expression IR with the backwards argument expression IR
+			for (unsigned int i = 1; i <= function_argument_stack[0].expr_end - function_argument_stack[0].expr; i++) {
+				function_argument_stack[0].expr[i] = function_argument_stack[0].expr_end[i];
+			}
+			// rewind the IR output
+			expr = function_argument_stack[0].expr_end;
 			tk_next();
 			*++expr = IR_CALL;
 			*++expr = sym;
-			if (sym->valtype != T_VOID) {
-				*++expr = IR_EX_SEC_PRI;
-			}
 			*++expr = IR_ADJ;
 			*++expr = tmp;
-			if (sym->valtype != T_VOID) {
-				*++expr = IR_EX_SEC_PRI;
-			}
 			tkvaltype = sym->valtype;
 			tkisconst = false;
 		} else if (sym->symtype & SYM_LOCAL) {
 			// local value
 			*++expr = IR_LEA_LOCAL;
+			*++expr = signext(sym->value);
+			//printf("sym->valtype = 0x%X\n", sym->valtype);
+			if (sym->valtype <= T_LONG) {
+				*++expr = sym->valtype + IR_LOAD_CHAR - T_CHAR;
+			} else {
+				*++expr = IR_LOAD_INT;
+			}
+			tkvaltype = sym->valtype;
+			tkisconst = false;
+		} else if (sym->symtype & SYM_GLOBAL) {
+			// global value
+			*++expr = IR_LEA_GLOBAL;
 			*++expr = sym->value;
 			if (sym->valtype <= T_LONG) {
 				*++expr = sym->valtype + IR_LOAD_CHAR - T_CHAR;
 			} else {
 				*++expr = IR_LOAD_INT;
 			}
-			tkisconst = false;
-		} else if (sym->symtype & SYM_GLOBAL) {
-			// global value
-			*++expr = IR_LEA_GLOBAL;
-			*++expr = sym->value;
-			if (sym->valtype < T_PTR) {
-				*++expr = 3 + IR_LOAD_CHAR - T_CHAR;
-			} else {
-				*++expr = sym->valtype + IR_LOAD_CHAR - T_CHAR;
-			}
+			tkvaltype = sym->valtype;
 			tkisconst = false;
 		} else {
 			error("Invalid variable type");
+		}
+		while (tk == '[') {
+			primary = tkval;
+			primarytype = tkvaltype;
+			primaryisconst = tkisconst;
+			tk_next();
+			d = expr;
+			if (!primaryisconst) {
+				*++expr = IR_PUSH;
+			}
+			expression(TK_ASSIGN);
+			if (tk != ']') {
+				error("Missing closing bracket");
+			}
+			if (primarytype == T_PTR) {
+				error("Cannot index pointer to void");
+			} else if (primarytype < T_PTR) {
+				error("Pointer type expected");
+			} else {
+				if (tkisconst && primaryisconst) { // constant[constant]
+					expr = d; // rewind emitted data for constant expression
+					tkval = primary + tkval * (tkvaltype & T_MASK);
+				} else if (primaryisconst) { // constant[var]
+					*++expr = IR_MUL_CONST;
+					*++expr = tkvaltype & T_MASK;
+					*++expr = IR_ADD_CONST;
+					*++expr = primary; // primary is not destroyed if the expression is not constant
+					tkisconst = false;
+				} else if (tkisconst) { // var[constant]
+					expr = d;
+					*++expr = IR_ADD_CONST;
+					*++expr = tkval * (tkvaltype & T_MASK);
+					tkisconst = false;
+				} else if ((primarytype & T_MASK) > 1) {
+					*++expr = IR_MUL_CONST;
+					*++expr = primarytype & T_MASK;
+					*++expr = IR_ADD;
+					tkisconst = false;
+				} else {
+					*++expr = IR_POP_SEC;
+					*++expr = IR_ADD;
+					tkisconst = false;
+				}
+				if (primarytype & T_INLINE_DATA) {
+					*++expr = IR_LOAD_CHAR + (primarytype & T_MASK) - T_CHAR;
+					tkvaltype &= ~T_INLINE_DATA;
+				} else {
+					if (primarytype >= T_PTR * 2) {
+						*++expr = IR_LOAD_INT;
+					} else {
+						*++expr = IR_LOAD_CHAR + (primarytype & T_MASK) - T_CHAR;
+					}
+					tkvaltype -= T_PTR;
+				}
+			}
+			primaryisptr = true;
+			tk_next();
 		}
 	} else if (tk == '(') {
 		tk_next();
@@ -953,7 +1098,7 @@ void expression(uint8_t level) {
 				tk_next();
 			}
 			if (tmp >= 256) {
-				error("Invalid type cast: octuple (8x) pointers and beyond are not supported");
+				error("Invalid type cast: quadruple (4x) pointers and beyond are not supported");
 			}
 			if (tk != ')') {
 				error("Invalid type cast: missing closing parenthesis");
@@ -983,6 +1128,7 @@ void expression(uint8_t level) {
 		} else {
 			error("Invalid/unsupported type for dereference");
 		}
+		primaryisptr = true;
 	} else if (tk == TK_AND) {
 		tk_next();
 		expression(TK_INC);
@@ -1028,14 +1174,18 @@ void expression(uint8_t level) {
 		tk_next();
 		expression(TK_INC);
 		if (*expr >= IR_LOAD_CHAR && *expr <= IR_LOAD_LONG) {
+			if (sym == NULL) {
+				error("Invalid value for increment/decrement");
+			}
 			*++expr = (tmp == TK_INC) ? IR_INC : IR_DEC;
-			*++expr = (tksym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
-			*++expr = tksym->value;
+			*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
+			*++expr = sym->value;
 			*++expr = tkvaltype & T_MASK;
 		} else {
 			error("Invalid value increment/decrement");
 		}
 	} else {
+		//printf("tk=0x%X \"%c\"\n", tk, tk);
 		error("Invalid expression");
 	}
 
@@ -1046,28 +1196,74 @@ void expression(uint8_t level) {
 	while (tk >= level) { // precedence climbing
 		tmp = tkvaltype;
 		if (tk == TK_ASSIGN) {
-			if (sym == NULL) {
-				error("Invalid variable assignment");
-			}
-			expr = tmpexpr;
-			tk_next();
-			expression(TK_ASSIGN);
-			if (tkisconst) {
-				if (tkvaltype == T_LONG) {
-					*++expr = IR_IMM_32;
-					*++expr = tkval;
-					*++expr = tkvalupper;
-				} else if (tkvaltype == T_STR) {
-					*++expr = IR_IMM_PROG_OFFSET;
-					*++expr = make_tmp_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
-				} else {
-					*++expr = IR_IMM;
-					*++expr = tkval;
+			if (primaryisptr) {
+				if (!primaryisconst) {
+					*expr = IR_PUSH;
 				}
+				d = expr;
+				tk_next();
+				expression(TK_ASSIGN);
+				if (tkisconst) {
+					expr = d;
+					if (primaryisconst) { // indirect const = const
+						expr--;
+						if ((primarytype & T_MASK) == T_LONG) {
+							*++expr = IR_IMM_32;
+							*++expr = tkval;
+							*++expr = tkval >> 24;
+						} else {
+							*++expr = IR_IMM;
+							*++expr = tkval;
+						}
+						*++expr = IR_STORE_GLOBAL;
+						*++expr = primary;
+					} else { // indirect var = const
+						*expr = IR_EX_SEC_PRI;
+						if ((primarytype & T_MASK) == T_LONG) {
+							*++expr = IR_IMM_32;
+							*++expr = tkval;
+							*++expr = tkval >> 24;
+						} else {
+							*++expr = IR_IMM;
+							*++expr = tkval;
+						}
+						*++expr = IR_STORE;
+					}
+				} else {
+					if (primaryisconst) { // indirect const = var
+						*++expr = IR_STORE_GLOBAL;
+						*++expr = primary;
+					} else { // indirect var = var
+						*++expr = IR_EX_SEC_PRI;
+						*++expr = IR_POP;
+						*++expr = IR_STORE;
+					}
+				}
+				*++expr = primarytype & T_MASK;
+			} else {
+				if (sym == NULL) {
+					error("Invalid variable assignment");
+				}
+				expr = tmpexpr;
+				tk_next();
+				expression(TK_ASSIGN);
+				if (tkisconst) {
+					if (tmp == T_LONG) {
+						*++expr = IR_IMM_32;
+						*++expr = tkval;
+						*++expr = tkval >> 24;
+					} else if (tkvaltype == T_STR) {
+						*++expr = IR_IMM_PROG_OFFSET;
+						*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+					} else {
+						*++expr = IR_IMM;
+						*++expr = tkval;
+					}
+				}
+				*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
+				*++expr = sym->value;
+				*++expr = tmp;
 			}
-			*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
-			*++expr = sym->value;
-			*++expr = tkvaltype;
 		} else if (tk == TK_COND) {
 			if (tkisconst) {
 				bool tkistrue = tkval;
@@ -1095,11 +1291,11 @@ void expression(uint8_t level) {
 					error("Missing colon in condition operator");
 				}
 				tk_next();
-				*d = make_tmp_sym(expr + 3 - exprstart, T_PTR);
+				*d = make_anon_sym(expr + 3 - exprstart, T_PTR);
 				*++expr = IR_JMP;
 				d = ++expr;
 				expression(TK_COND);
-				*d = make_tmp_sym(expr + 1 - exprstart, T_PTR);
+				*d = make_anon_sym(expr + 1 - exprstart, T_PTR);
 			}
 		} else if (tk == TK_LOR) {
 			tk_next();
@@ -1151,7 +1347,11 @@ void expression(uint8_t level) {
 			tmp = tk;
 			tk_next();
 			if (!primaryisconst) {
-				*++expr = IR_PUSH;
+				if (primarytype == T_LONG) {
+					*++expr = IR_PUSH_32;
+				} else {
+					*++expr = IR_PUSH;
+				}
 			}
 			expression(tmp+1);
 			if (primaryisconst) {
@@ -1201,58 +1401,26 @@ void expression(uint8_t level) {
 					primaryisconst = false;
 				}
 			} else {
-				*++expr = IR_POP_SEC;
+				if (primarytype == T_LONG) {
+					*++expr = IR_POP_32;
+				} else {
+					*++expr = IR_POP_SEC;
+				}
 				*++expr = tmp + IR_OR - TK_OR;
 			}
 		} else if (tk == TK_INC || tk == TK_DEC) {
 			if (*expr >= IR_LOAD_CHAR && *expr <= IR_LOAD_LONG) {
+				if (sym == NULL) {
+					error("Invalid value for post increment/decrement");
+				}
 				*++expr = (tk == TK_INC) ? IR_INC : IR_DEC;
-				*++expr = (tksym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
+				*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
+				*++expr = sym->value;
 				*++expr = tkvaltype & T_MASK;
-				*++expr = tksym->value;
 			} else {
 				error("Invalid value for post increment/decrement");
 			}
 			tk_next();
-		} else if (tk == '[') {
-			tk_next();
-			if (!primaryisconst) {
-				*++expr = IR_PUSH;
-			}
-			d = expr;
-			expression(TK_ASSIGN);
-			if (tk != ']') {
-				error("Missing closing bracket");
-			}
-			tk_next();
-			if ((tkvaltype & T_MASK) <= T_LONG && tkvaltype > T_PTR) {
-				if (tkisconst && primaryisconst) { // constant[constant]
-					expr = d; // rewind emitted data for constant expression
-					primary += tkval * (tkvaltype & T_MASK);
-					*++expr = IR_IMM;
-					*++expr = primary;
-				} else if (primaryisconst) { // constant[var]
-					*++expr = IR_MUL_CONST;
-					*++expr = tkvaltype & T_MASK;
-					*++expr = IR_ADD_CONST;
-					*++expr = primary; // primary is not destroyed if the expression is not constant
-				} else if (tkisconst) { // var[constant]
-					*++expr = IR_ADD_CONST;
-					*++expr = tkval * (tkvaltype & T_MASK);
-				} else if ((tkvaltype & T_MASK) > 1) {
-					*++expr = IR_MUL_CONST;
-					*++expr = tkvaltype & T_MASK;
-					*++expr = IR_ADD;
-				} else {
-					*++expr = IR_POP_SEC;
-					*++expr = IR_ADD;
-				}
-				*++expr = IR_LOAD_CHAR + primarytype - T_CHAR;
-			} else if (tkvaltype < T_PTR) {
-				error("Pointer type expected");
-			} else if (tkvaltype == T_PTR) {
-				error("Cannot index pointer to void");
-			}
 		} else {
 			error("Invalid syntax");
 		}
@@ -1261,6 +1429,8 @@ void expression(uint8_t level) {
 	tkvaltype = primarytype;
 	tkisconst = primaryisconst;
 }
+
+void compile(void);
 
 void statement(void) {
 	_ptr *a, *b;
@@ -1277,13 +1447,13 @@ void statement(void) {
 		b = ++expr;
 		statement();
 		if (tk == TK_ELSE) {
-			*b = make_tmp_sym(expr + 3 - exprstart, T_PTR);
+			*b = make_anon_sym(expr + 3 - exprstart, T_PTR);
 			*++expr = IR_JMP;
 			b = ++expr;
 			tk_next();
 			statement();
 		}
-		*b = make_tmp_sym(expr + 1 - exprstart, T_PTR);
+		*b = make_anon_sym(expr + 1 - exprstart, T_PTR);
 	} else if (tk == TK_WHILE) {
 		tk_next();
 		a = expr + 1;
@@ -1292,20 +1462,36 @@ void statement(void) {
 		}
 		tk_next();
 		expression(TK_ASSIGN);
-		if (tk != '(') {
+		if (tk != ')') {
 			error("Missing closing parenthesis");
 		}
 		tk_next();
 		*++expr = IR_BZ;
 		b = ++expr;
-		statement();
+		if (tk == '{') {
+			tk_next();
+			while (tk != '}') {
+				statement();
+			}
+		} else if (tk != ';') {
+			statement();
+		}
+		tk_next();
 		*++expr = IR_JMP;
-		*++expr = make_tmp_sym(a - exprstart, T_PTR);
-		*b = make_tmp_sym(expr + 1 - exprstart, T_PTR);
+		*++expr = make_anon_sym(a - exprstart, T_PTR);
+		*b = make_anon_sym(expr + 1 - exprstart, T_PTR);
 	} else if (tk == TK_DO) {
 		tk_next();
 		a = expr + 1;
-		statement();
+		if (tk == '{') {
+			tk_next();
+			while (tk != '}') {
+				statement();
+			}
+		} else if (tk != ';') {
+			statement();
+		}
+		tk_next();
 		if (tk != TK_WHILE) {
 			error("Missing while in do ... while loop.");
 		}
@@ -1325,7 +1511,7 @@ void statement(void) {
 			error("Missing semicolon");
 		}
 		tk_next();
-		*b = make_tmp_sym(a - exprstart, T_PTR);
+		*b = make_anon_sym(a - exprstart, T_PTR);
 	} else if (tk == TK_RETURN) {
 		tk_next();
 		if (tk != ';') {
@@ -1354,33 +1540,34 @@ void statement(void) {
 }
 
 void precompile(void) {
-	if ((symtable = malloc(sizeof(symbol))) == NULL) {
+	if ((symtable = _malloc(sizeof(symbol))) == NULL) {
 		error("Failed to malloc space for initial symbol");
 	}
-	if ((data_resolve_stack = malloc(sizeof(int) * DATA_RESOLVE_STACK_SIZE)) == NULL) {
+	if ((data_resolve_stack = _malloc(sizeof(int) * DATA_RESOLVE_STACK_SIZE)) == NULL) {
 		error("Failed to malloc space for data resolution stack");
 	}
-	if ((localsymstack = malloc(sizeof(symbol*) * SYM_STACK_SAVE_SIZE)) == NULL) {
+	if ((localsymstack = _malloc(sizeof(symbol*) * SYM_STACK_SAVE_SIZE)) == NULL) {
 		error("Failed to malloc space for symbol stack local save stack");
 	}
-	if ((resolvestack = resolvestackstart = malloc(RESOLVE_STACK_SIZE*sizeof(_ptr))) == NULL) {
+	if ((resolvestack = resolvestackstart = _malloc(RESOLVE_STACK_SIZE*sizeof(_ptr))) == NULL) {
 		error("Failed to malloc space for address resolution stack\n");
 	}
 	memset(symtable, 0, sizeof(symbol));
-	add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 0);
-	add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 3);
-	add_sym("char", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 1);
-	add_sym("short", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 2);
-	add_sym("int", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 3);
-	add_sym("long", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 4);
-	add_sym("uint8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 1);
-	add_sym("uint16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 2);
-	add_sym("uint24_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 3);
-	add_sym("uint32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 4);
-	add_sym("int8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 1);
-	add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 2);
-	add_sym("int24_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 3);
-	add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, 4);
+	memset(localsymstack, 0, sizeof(symbol*));
+	add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
+	add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
+	add_sym("char", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+	add_sym("short", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+	add_sym("int", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
+	add_sym("long", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+	add_sym("uint8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
+	add_sym("uint16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+	add_sym("uint24_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
+	add_sym("uint32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+	add_sym("int8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+	add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+	add_sym("int24_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
+	add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
 }
 
 void resolve_later(unsigned int offset, symbol *val) {
@@ -1389,6 +1576,10 @@ void resolve_later(unsigned int offset, symbol *val) {
 }
 
 void postcompile(void) {
+	if (*expr != IR_EXIT && *expr != IR_LEAVE) {
+		*++expr = IR_EXIT;
+	}
+	expr++;
 	data_start = ++expr;
 	while (data_resolve_sp > 0) {
 		unsigned int len = (unsigned int)data_resolve_stack[--data_resolve_sp];
@@ -1410,7 +1601,104 @@ void compile(void) {
 	lno = 1;
 	tk_next();
 	while (tk) {
-		if (tk == TK_ENUM) {
+		if (tk == TK_INCLUDE) {
+			unsigned int i, savedsrcoffset, savedsrclen, savedlno;
+			char *fname, *savedsrc, ch;
+#ifdef PLATFORM_DESKTOP
+			FILE *fd;
+#else
+#ifdef BOS_BUILD
+			void *fd;
+#else
+			uint8_t fd;
+#endif
+#endif
+			tk_next();
+			i = srcoffset;
+			if (tk == TK_LT) {
+#ifdef PLATFORM_DESKTOP
+				error("#include <> not yet implemented on this platform");
+#else
+#ifndef BOS_BUILD
+				error("#include <> not yet implemented on this platform");
+#endif
+#endif
+				while ((ch = srcdata[srcoffset++]) != '>') {
+					if (ch == '\n') {
+						error("Unexpected line break");
+					}
+				}
+				if (srcoffset-i <= 1) {
+					error("Invalid #include file name");
+				}
+				if ((fname = malloc(srcoffset+1-i)) == NULL) {
+					error("Out of memory");
+				}
+				memcpy(fname, &srcdata[i], srcoffset-i);
+				fname[srcoffset-i] = 0;
+			} else if (tk == TK_STR) {
+				fname = tkvalstr;
+			} else {
+				error("Invalid #include statement");
+			}
+			while (getchar() != '\n');
+			savedsrc = srcdata;
+			savedsrcoffset = srcoffset;
+			savedsrclen = srclen;
+			savedlno = lno;
+#ifdef PLATFORM_DESKTOP
+			if ((fd = fopen(fname, "r")) == NULL) {
+				error("Include file not found");
+			}
+			fseek(fd, 0, 2);
+			srclen = ftell(fd);
+			fseek(fd, 0, 0);
+			if ((srcdata = malloc(srclen)) == NULL) {
+				error("Out of memory");
+			}
+			fread(srcdata, srclen, 1, fd);
+			fclose(fd);
+			printf("Compiling included source file \"%s\"\n", fname);
+#else
+#ifdef BOS_BUILD
+			if ((fd = fs_OpenFile(fname)) == -1) {
+				error("Include file not found");
+			}
+			srcdata = fs_GetFDPtr(fd);
+			srclen = fs_GetFDLen(fd);
+			gui_Print("Compiling included source \"");
+			gui_Print(fname);
+			gui_PrintLine("\"");
+#else
+			if ((fd = ti_Open(fname, "r")) == -1) {
+				error("Include file not found");
+			}
+			srcdata = ti_GetDataPtr(fd);
+			srclen = ti_GetSize(fd);
+			ti_Close(fd);
+			console_printline("Compiling included source");
+			console_printline(fname);
+#endif
+#endif
+			srcoffset = lno = 0;
+			compile();
+#ifdef PLATFORM_DESKTOP
+			printf("Finished compiling included file\n");
+#else
+#ifdef BOS_BUILD
+			gui_PrintLine("Finished compiling included file");
+#else
+			console_printline("Finished compiling included file");
+#endif
+#endif
+			free(srcdata);
+			free(fname);
+			srcdata = savedsrc;
+			srcoffset = savedsrcoffset;
+			srclen = savedsrclen;
+			lno = savedlno + 1;
+			goto nexttoken;
+		} else if (tk == TK_ENUM) {
 			tk_next();
 			if (tk != '{') {
 				tk_next();
@@ -1444,6 +1732,8 @@ void compile(void) {
 			}
 			tk_next();
 		} else {
+			// printf("tk=0x%X\n", tk);
+			goto nexttoken;
 			error("Invalid identifier at start of line");
 		}
 		while (tk != ';' && tk != '}') {
@@ -1458,10 +1748,24 @@ void compile(void) {
 			if (tksym != NULL) {
 				error("Duplicate global declaration");
 			}
-			sym = add_sym(tkname, tknamelen, 0, ty, 0);
 			tk_next();
+			sym = add_sym(tkname, tknamelen, 0, ty, 0);
 			// printf("tk = %X \"%c\"\n", tk, tk);
-			if (tk == '(') { // function declaration
+			if (tk == '[') {
+				tk_next();
+				sym->value = globaladdr;
+				if (tk == TK_NUM) {
+					globaladdr += tkval * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
+				} else if (tksym != NULL) {
+					if (!(tksym->symtype & SYM_CONSTANT)) {
+						error("Global array length initializer must be constant");
+					}
+					globaladdr += tksym->value * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
+				} else {
+					error("Invalid global declaration");
+				}
+				sym->valtype |= T_INLINE_DATA;
+			} else if (tk == '(') { // function declaration
 				save_sym_stack();
 				sym->symtype = SYM_FUNCTION;
 				sym->value = expr + 1 - exprstart;
@@ -1484,14 +1788,18 @@ void compile(void) {
 						ty += T_PTR;
 					}
 					if (tk != TK_ID) {
+						if (ty == T_VOID && argdepth == 6 && tk == ')') {
+							break;
+						}
 						error("Invalid parameter declaration");
 					}
 					if (tksym != NULL && tksym->symtype & SYM_LOCAL) {
 						error("Duplicate parameter declaration");
 					}
+					// printf("added local symbol with type 0x%X\n", ty);
 					add_sym(tkname, tknamelen, SYM_LOCAL, ty, argdepth);
 
-					if (ty & T_MASK == T_LONG) {
+					if ((ty & T_MASK) == T_LONG) {
 						argdepth += 6;
 					} else {
 						argdepth += 3;
@@ -1547,13 +1855,99 @@ void compile(void) {
 						if (tksym != NULL && tksym->symtype & SYM_LOCAL) {
 							error("Duplicate local declaration");
 						}
-						if (ty & T_MASK == T_LONG) {
+						sym = add_sym(tkname, tknamelen, SYM_LOCAL, ty, 0);
+						tk_next();
+						if (tk == '[') {
+							tk_next();
+							if (tk == TK_NUM) {
+								sym->datalen = tkval;
+							} else if (tksym != NULL) {
+								if (!(tksym->symtype & SYM_CONSTANT)) {
+									error("Local array length initializer must be constant");
+								}
+								sym->datalen = tksym->value;
+							} else {
+								error("Invalid local declaration");
+							}
+							stackdepth -= sym->datalen * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
+							sym->valtype |= T_INLINE_DATA;
+							tk_next();
+							if (tk != ']') {
+								error("Missing closing bracket");
+							}
+							tk_next();
+						} else if ((ty & T_MASK) == T_LONG) {
 							stackdepth -= 4;
 						} else {
 							stackdepth -= 3;
 						}
-						add_sym(tkname, tknamelen, SYM_LOCAL, ty, stackdepth);
-						tk_next();
+						sym->value = stackdepth;
+						if (tk == TK_ASSIGN) {
+							tk_next();
+							if (tk == TK_NUM) {
+								if (sym->valtype & T_INLINE_DATA) {
+									error("Invalid local initializer for inline data local");
+								}
+								if ((sym->valtype & T_MASK) == T_LONG) {
+									*++expr = IR_IMM_32;
+									*++expr = tkval;
+									*++expr = tkval >> 24;
+								} else {
+									*++expr = IR_IMM;
+									*++expr = tkval;
+								}
+							} else if (tk == TK_STR) {
+								*++expr = IR_IMM_PROG_OFFSET;
+								*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+								if (sym->valtype & T_INLINE_DATA) {
+									*++expr = IR_EX_SEC_PRI;
+									*++expr = IR_LEA_LOCAL;
+									*++expr = signext(sym->value);
+									*++expr = IR_STRCPY;
+								} else if ((sym->valtype & T_MASK) == T_STR) {
+									*++expr = IR_STORE_LOCAL;
+									*++expr = sym->value;
+									*++expr = sym->valtype & T_MASK;
+								} else {
+									error("Invalid local type for string initializer");
+								}
+							} else if (tk == '{') {
+								unsigned int counter = 0;
+								tk_next();
+								do {
+									if (tk == TK_NUM) {
+										if ((sym->valtype & T_MASK) == T_LONG) {
+											*++expr = IR_IMM_32;
+											*++expr = tkval;
+											*++expr = tkval >> 24;
+										} else {
+											*++expr = IR_IMM;
+											*++expr = tkval;
+										}
+										*++expr = sym->value;
+										*++expr = sym->valtype & T_MASK;
+									} else if (tk == TK_STR) {
+										if ((sym->valtype & T_MASK) == T_LONG) {
+											error("Invalid local type for string array initializer");
+										}
+										*++expr = IR_IMM_PROG_OFFSET;
+										*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+									} else {
+										error("Invalid value in local initializer array");
+									}
+									counter++;
+									tk_next();
+									if (tk == ',') {
+										tk_next();
+										if (tk == '}') {
+											error("Expected value following comma in local initializer array");
+										}
+									}
+								} while (tk != '}');
+							} else {
+								error("Invalid local initializer");
+							}
+						}
 						if (tk == ',') {
 							tk_next();
 							if (tk == ')') {
@@ -1574,9 +1968,11 @@ void compile(void) {
 				}
 				free_local_symbols();
 			} else {
-				add_sym(tkname, tknamelen, SYM_GLOBAL, ty, globaladdr);
-				if (ty & T_MASK > 0) {
-					globaladdr += ty & T_MASK;
+				sym->value = globaladdr;
+				if ((ty & T_MASK) > 0) {
+					globaladdr += (ty & T_MASK);
+				} else if (ty >= T_PTR) {
+					globaladdr += 3;
 				} else {
 					error("Invalid global declaration");
 				}
@@ -1585,10 +1981,6 @@ void compile(void) {
 	nexttoken:;
 		tk_next();
 	}
-	if (*expr != IR_EXIT && *expr != IR_LEAVE) {
-		*++expr = IR_EXIT;
-	}
-	expr++;
 }
 
 uint8_t convert_flag_to_char(uint8_t bt) {
@@ -1614,17 +2006,75 @@ uint8_t convert_flag_to_char(uint8_t bt) {
 	return bt;
 }
 
+uint8_t convert_to_zf(uint8_t bt, bool z) {
+	if (bt == T_CHAR) {
+		EMIT_OR_A(out);
+		bt = T_BOOL_ZF;
+	} else if (bt == T_WORD) {
+		EMIT_LD_A_H(out);
+		EMIT_OR_L(out);
+		bt = T_BOOL_ZF;
+	} else if (bt == T_INT) {
+		EMIT_ADD_HL_BC(out);
+		EMIT_OR_A(out);
+		EMIT_SBC_HL_BC(out);
+		bt = T_BOOL_ZF;
+	} else if (bt == T_LONG) {
+		EMIT_ADD_HL_BC(out);
+		EMIT_XOR_A(out);
+		EMIT_LD_D_A(out);
+		EMIT_LD_A_E(out);
+		EMIT_SBC_HL_BC(out);
+		EMIT_SBC_A_D(out);
+		bt = T_BOOL_ZF;
+	} else if (bt == T_BOOL_CF) {
+		EMIT_SBC_A_A(out);
+		EMIT_AND_IMM(out, 1);
+		bt = T_BOOL_ZF;
+	} else if (bt == T_BOOL_NCF) {
+		EMIT_SBC_A_A(out);
+		EMIT_INC_A(out);
+		bt = T_BOOL_ZF;
+	}
+	if (z) {
+		if (bt == T_BOOL_NZF) {
+			EMIT_LD_A_IMM(out, 1);
+			EMIT_JR_NZ_IMM(out, L_XOR_A);
+			EMIT_XOR_A(out);
+			EMIT_OR_A(out);
+		}
+		return T_BOOL_ZF;
+	} else {
+		if (bt == T_BOOL_ZF) {
+			EMIT_LD_A_IMM(out, 1);
+			EMIT_JR_Z_IMM(out, L_XOR_A);
+			EMIT_XOR_A(out);
+			EMIT_OR_A(out);
+		}
+		return T_BOOL_NZF;
+	}
+}
+
 void exchage_primary_secondary(uint8_t bt) {
-	if (bt == T_WORD) {
-		EMIT_SIS_SUFFIX(out);
-	}
-	if (bt != T_CHAR) {
-		EMIT_EX_DE_HL(out);
-	}
-	if (bt == T_LONG || bt == T_CHAR) {
+	if (bt == T_LONG) {
+		EMIT_PUSH_BC(out);
 		EMIT_LD_C_A(out);
 		EMIT_LD_A_E(out);
 		EMIT_LD_E_C(out);
+		EMIT_EX_IND_SP_HL(out);
+		EMIT_POP_BC(out);
+	} else {
+		if (bt == T_WORD) {
+			EMIT_SIS_SUFFIX(out);
+		}
+		if (bt != T_CHAR) {
+			EMIT_EX_DE_HL(out);
+		}
+		if (bt == T_CHAR) {
+			EMIT_LD_C_A(out);
+			EMIT_LD_A_E(out);
+			EMIT_LD_E_C(out);
+		}
 	}
 }
 
@@ -1658,7 +2108,7 @@ void postassemble(void) {
 		if (sym->value >= (data_start - exprstart)) {
 			if (!(sym->symtype & SYM_RESOLVED)) {
 				sym->symtype |= SYM_RESOLVED;
-				printf("Symbol %s value %X\n", (char*)&sym->name, sym->value);
+				//printf("Symbol %s value %X\n", (char*)&sym->name, sym->value);
 				sym->resolved_value = PROGRAM_ORIGIN + (out - outstart) + sym->value - (data_start - exprstart);
 			}
 		}
@@ -1680,11 +2130,11 @@ void postassemble(void) {
 				unsigned int tmpval = PROGRAM_ORIGIN + (out - outstart) + sym->value - (data_start - exprstart);
 				memcpy(&outstart[offset], &tmpval, 3);
 			} else {
-				printf("Symbol name: \"%s\"\n", (char*)&sym->name);
-				printf("Symbol value: %u\n", sym->value);
-				printf("Symbol type: 0x%X\n", sym->valtype);
-				printf("Output offset: %u\n", offset);
-				printf("data_start-exprstart = %llu\n", data_start - exprstart);
+				//printf("Symbol name: \"%s\"\n", (char*)&sym->name);
+				//printf("Symbol value: %u\n", sym->value);
+				//printf("Symbol type: 0x%X\n", sym->valtype);
+				//printf("Output offset: %u\n", offset);
+				//printf("data_start-exprstart = %llu\n", data_start - exprstart);
 				error("Internal: Failed to resolve symbol in assembly step");
 			}
 		}
@@ -1720,11 +2170,10 @@ void try_resolve_symbols(unsigned int offset) {
 }
 
 void assemble(void) {
-	bool hlisbytelike = false, deisbytelike = false, bcisbytelike = false;
-	bool zf = false, cf = false, argispowerof2 = false;
+	bool argispowerof2 = false;
 	int op;
 	_ptr arg, *expr = exprstart;
-	uint8_t l, bt = T_INT, *leaveaddress = NULL, *last_compare_ptr = NULL;
+	uint8_t l, bt = T_VOID, *leaveaddress = NULL, *last_compare_ptr = NULL, *prevout = out, *prevprevout = out;
 	symbol *sym, *mainsym;
 	uint8_t *addrtmp;
 
@@ -1748,22 +2197,26 @@ void assemble(void) {
 	errsp_offset = out - (outstart + 3);
 	EMIT_CALL_IMM(out, TI_RunIndicOff);
 	EMIT_CALL_IMM(out, TI_HomeUp);
-	try_resolve_symbols(expr - exprstart);
-	if (mainsym->symtype & SYM_RESOLVED) {
-		EMIT_CALL_IMM(out, mainsym->resolved_value);
-	} else {
-		EMIT_CALL_IMM(out, 0);
-		resolve_later(out - (outstart + 3), mainsym);
-	}
+	EMIT_CALL_IMM(out, 0);
+	resolve_later(out - (outstart + 3), mainsym);
 	exitroutineptr = PROGRAM_ORIGIN + out - outstart;
 	addrtmp = exitroutineptr + 1;
 	EMIT_LD_SP_IMM(out, 0);
 	memcpy(&outstart[errsp_offset], &addrtmp, 3);
 	EMIT_CALL_IMM(out, TI_RunIndicOn);
 	EMIT_JP_IMM(out, TI_HomeUp);
-	while (expr < data_start) {
+	expr++;
+	while (1) {
+		prevprevout = prevout;
+		prevout = out;
 		try_resolve_symbols(expr - exprstart);
+#ifdef DEBUG
+		printf("out offset: %llu expr offset: %llu\n", out-outstart, expr-exprstart);
+#endif
 		op = *expr++;
+		if (expr >= data_start) {
+			break;
+		}
 		arg = *expr;
 		if (arg > 0) {
 			while (!(arg & 1)) {
@@ -1779,8 +2232,10 @@ void assemble(void) {
 				break;
 			case IR_IMM:
 				expr++;
-				if (hlisbytelike && (unsigned)arg < 0x100) {
-					EMIT_LD_L_IMM(out, (unsigned)arg);
+				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
+					out = prevprevout;
+					EMIT_LD_DE_IMM(out, (unsigned)arg);
+					expr++;
 				} else {
 					EMIT_LD_HL_IMM(out, (unsigned)arg);
 				}
@@ -1789,17 +2244,36 @@ void assemble(void) {
 			case IR_IMM_PROG_OFFSET:
 				expr++;
 				resolve_later(out + 1 - outstart, arg);
-				EMIT_LD_HL_IMM(out, 0);
+				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
+					out = prevprevout;
+					EMIT_LD_DE_IMM(out, 0);
+					expr++;
+				} else {
+					EMIT_LD_HL_IMM(out, 0);
+				}
 				break;
 			case IR_IMM_8:
 				expr++;
-				EMIT_LD_A_IMM(out, (unsigned)arg);
+				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
+					out = prevprevout;
+					EMIT_LD_E_IMM(out, (unsigned)arg);
+					expr++;
+				} else {
+					EMIT_LD_A_IMM(out, (unsigned)arg);
+				}
 				bt = T_CHAR;
 				break;
 			case IR_IMM_32:
 				expr++;
-				EMIT_LD_HL_IMM(out, (unsigned)arg);
-				EMIT_LD_E_IMM(out, (unsigned)*expr);
+				if (expr[-2] == IR_PUSH_32 && expr[1] == IR_EX_SEC_PRI) {
+					out = prevprevout;
+					EMIT_LD_BC_IMM(out, (unsigned)arg);
+					EMIT_LD_A_IMM(out, (unsigned)*expr);
+					expr++;
+				} else {
+					EMIT_LD_HL_IMM(out, (unsigned)arg);
+					EMIT_LD_E_IMM(out, (unsigned)*expr);
+				}
 				expr++;
 				bt = T_LONG;
 				break;
@@ -1817,12 +2291,12 @@ void assemble(void) {
 				break;
 			case IR_PUSH_IMM_32:
 				expr++;
-				if (hlisbytelike && (unsigned)arg < 0x100) {
-					EMIT_LD_L_IMM(out, (unsigned)arg);
-				} else {
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-				}
-				EMIT_LD_E_IMM(out, *++expr);
+				EMIT_LD_BC_IMM(out, (unsigned)arg);
+				EMIT_PUSH_BC(out);
+				arg = *expr++;
+				EMIT_LD_C_IMM(out, (unsigned)arg);
+				EMIT_PUSH_BC(out);
+				break;
 			case IR_PUSH_32:
 				EMIT_PUSH_HL(out);
 			case IR_PUSH_SEC:
@@ -1833,7 +2307,6 @@ void assemble(void) {
 				break;
 			case IR_POP:
 				EMIT_POP_HL(out);
-				bt = T_INT;
 				break;
 			case IR_POP_SEC:
 				EMIT_POP_DE(out);
@@ -1845,10 +2318,10 @@ void assemble(void) {
 				EMIT_POP_BC(out);
 				EMIT_LD_A_C(out);
 				EMIT_POP_BC(out);
-				bt = T_LONG;
 				break;
 			case IR_EX_SEC_PRI:
-				EMIT_EX_DE_HL(out);
+				bt = convert_flag_to_char(bt);
+				exchage_primary_secondary(bt);
 				break;
 			case IR_CALL:
 				expr++;
@@ -1858,6 +2331,7 @@ void assemble(void) {
 				//} else {
 					EMIT_CALL_IMM(out, 0);
 				//}
+				bt = ((symbol*)arg)->valtype;
 				break;
 			case IR_ADJ:
 				expr++;
@@ -1900,56 +2374,78 @@ void assemble(void) {
 				break;
 			case IR_PUSH_IMM:
 				expr++;
-				if ((unsigned)arg < 0x100) {
-					if (hlisbytelike) {
-						EMIT_LD_L_IMM(out, (unsigned)arg);
-						EMIT_PUSH_HL(out);
-					} else if (deisbytelike) {
-						EMIT_LD_E_IMM(out, (unsigned)arg);
-						EMIT_PUSH_DE(out);
-					} else if (bcisbytelike) {
-						EMIT_LD_C_IMM(out, (unsigned)arg);
-						EMIT_PUSH_BC(out);
-					} else {
-						EMIT_LD_HL_IMM(out, (unsigned)arg);
-						EMIT_PUSH_HL(out);
-					}
-				} else {
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-					EMIT_PUSH_HL(out);
-				}
+				EMIT_LD_BC_IMM(out, (unsigned)arg);
+				EMIT_PUSH_BC(out);
 				break;
 			case IR_LEA_LOCAL:
 				expr++;
-				if ((unsigned)arg+0x80 < 0x100) {
+				if ((unsigned)(arg+0x80) < 0x100) {
 					l = *expr++;
-					if (l == IR_LOAD_CHAR) {
-						EMIT_LD_A_IND_IX_DD(out, (unsigned)arg);
-						bt = T_CHAR;
-					} else if (l == IR_LOAD_WORD) {
-						EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-						EMIT_SIS_SUFFIX(out);
-						EMIT_EX_DE_HL(out);
-						bt = T_WORD;
-					} else if (l == IR_LOAD_INT) {
-						EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-						bt = T_INT;
-					} else if (l == IR_LOAD_LONG) {
-						if ((unsigned)arg+3+0x80 < 0x100) {
+					if ((expr[-3] == IR_PUSH || expr[-3] == IR_PUSH_32) && *expr == IR_EX_SEC_PRI) {
+						expr++;
+						out = prevprevout;
+						if (l == IR_LOAD_CHAR) {
+							EMIT_LD_E_IND_IX_DD(out, (unsigned)arg);
+							bt = T_CHAR;
+						} else if (l == IR_LOAD_WORD) {
+							EMIT_PUSH_HL(out);
 							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-							EMIT_LD_E_IND_IX_DD(out, arg+3);
+							EMIT_SIS_SUFFIX(out);
+							EMIT_EX_DE_HL(out);
+							EMIT_POP_HL(out);
+							bt = T_WORD;
+						} else if (l == IR_LOAD_INT) {
+							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
+							bt = T_INT;
+						} else if (l == IR_LOAD_LONG) {
+							if ((unsigned)(arg+3+0x80) < 0x100) {
+								EMIT_LD_BC_IND_IX_DD(out, (unsigned)arg);
+								EMIT_LD_A_IND_IX_DD(out, arg+3);
+							} else {
+								EMIT_PUSH_IX(out);
+								EMIT_LD_BC_IMM(out, (unsigned)arg);
+								EMIT_ADD_IX_BC(out);
+								EMIT_LD_BC_IND_IX_DD(out, 0);
+								EMIT_LD_A_IND_IX_DD(out, 3);
+								EMIT_POP_IX(out);
+							}
+							bt = T_LONG;
 						} else {
-							EMIT_PUSH_IX(out);
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
-							EMIT_ADD_IX_BC(out);
-							EMIT_LD_HL_IND_IX_DD(out, 0);
-							EMIT_LD_E_IND_IX_DD(out, 3);
-							EMIT_POP_IX(out);
+							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
+							bt = T_PTR;
+							expr--;
+							expr--;
 						}
-						bt = T_LONG;
 					} else {
-						bt = T_PTR;
-						expr--;
+						if (l == IR_LOAD_CHAR) {
+							EMIT_LD_A_IND_IX_DD(out, (unsigned)arg);
+							bt = T_CHAR;
+						} else if (l == IR_LOAD_WORD) {
+							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
+							EMIT_SIS_SUFFIX(out);
+							EMIT_EX_DE_HL(out);
+							bt = T_WORD;
+						} else if (l == IR_LOAD_INT) {
+							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
+							bt = T_INT;
+						} else if (l == IR_LOAD_LONG) {
+							if ((unsigned)(arg+3+0x80) < 0x100) {
+								EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
+								EMIT_LD_E_IND_IX_DD(out, arg+3);
+							} else {
+								EMIT_PUSH_IX(out);
+								EMIT_LD_BC_IMM(out, (unsigned)arg);
+								EMIT_ADD_IX_BC(out);
+								EMIT_LD_HL_IND_IX_DD(out, 0);
+								EMIT_LD_E_IND_IX_DD(out, 3);
+								EMIT_POP_IX(out);
+							}
+							bt = T_LONG;
+						} else {
+							EMIT_LEA_HL_IX_DD(out, (unsigned)arg);
+							bt = T_PTR;
+							expr--;
+						}
 					}
 				} else {
 					EMIT_LEA_HL_IX_DD(out, 0);
@@ -1974,10 +2470,11 @@ void assemble(void) {
 					bt = T_INT;
 				} else if (l == IR_LOAD_LONG) {
 					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
-					EMIT_LD_DE_IND_IMM(out, arg+3);
+					EMIT_LD_DE_IND_IMM(out, (unsigned)(arg+3));
 					bt = T_LONG;
 				} else {
 					expr--;
+					EMIT_LD_HL_IMM(out, (unsigned)arg);
 					bt = T_PTR;
 				}
 				break;
@@ -1994,11 +2491,15 @@ void assemble(void) {
 					EMIT_LD_L_A(out);
 					bt = l;
 				}
-				if ((unsigned)arg+0x80 < 0x100) {
+				if ((unsigned)(arg+0x80) < 0x100) {
 					if (l == T_CHAR) {
-						EMIT_LD_IND_IX_DD_L(out, (unsigned)arg);
+						if (bt == T_CHAR) {
+							EMIT_LD_IND_IX_DD_A(out, (unsigned)arg);
+						} else {
+							EMIT_LD_IND_IX_DD_L(out, (unsigned)arg);
+						}
 					} else if (l == T_WORD) {
-						if ((unsigned)arg+0x81 < 0x100) {
+						if ((unsigned)(arg+1+0x80) < 0x100) {
 							EMIT_LD_IND_IX_DD_L(out, (unsigned)arg);
 							EMIT_LD_IND_IX_DD_H(out, arg+1);
 						} else {
@@ -2008,9 +2509,9 @@ void assemble(void) {
 							EMIT_DEC_IX(out);
 						}
 					} else if (l == T_LONG) {
-						if ((unsigned)arg+0x83 < 0x100) {
+						if ((unsigned)(arg+3+0x80) < 0x100) {
 							EMIT_LD_IND_IX_DD_HL(out, (unsigned)arg);
-							EMIT_LD_IND_IX_DD_E(out, arg+3);
+							EMIT_LD_IND_IX_DD_E(out, (unsigned)(arg+3));
 						} else {
 							EMIT_PUSH_IX(out);
 							EMIT_LD_BC_IMM(out, (unsigned)arg);
@@ -2021,6 +2522,33 @@ void assemble(void) {
 						}
 					} else {
 						EMIT_LD_IND_IX_DD_HL(out, (unsigned)arg);
+					}
+				} else {
+					if (l != T_CHAR) {
+						EMIT_PUSH_HL(out);
+						EMIT_PUSH_HL(out);
+					}
+					EMIT_LEA_HL_IX_DD(out, 0);
+					EMIT_LD_BC_IMM(out, (unsigned)arg);
+					EMIT_ADD_HL_BC(out);
+					if (l == T_CHAR) {
+						EMIT_LD_IND_HL_A(out);
+					} else {
+						EMIT_POP_BC(out);
+						if (l == T_WORD) {
+							EMIT_LD_IND_HL_C(out);
+							EMIT_INC_HL(out);
+							EMIT_LD_IND_HL_B(out);
+						} else {
+							EMIT_LD_IND_HL_BC(out);
+							if (l == T_LONG) {
+								EMIT_INC_HL(out);
+								EMIT_INC_HL(out);
+								EMIT_INC_HL(out);
+								EMIT_LD_IND_HL_E(out);
+							}
+						}
+						EMIT_POP_HL(out);
 					}
 				}
 				break;
@@ -2779,21 +3307,39 @@ void assemble(void) {
 				break;
 			case IR_ADD_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_ADD_A_IMM(out, (unsigned)arg);
-				} else if (bt == T_LONG) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_XOR_A(out);
-					EMIT_ADD_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-				} else {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					if (bt == T_WORD) {
-						EMIT_SIS_SUFFIX(out);
+				if (arg != 0) {
+					bt = convert_flag_to_char(bt);
+					if (bt == T_CHAR) {
+						if (arg == 1) {
+							EMIT_INC_A(out);
+						} else if (arg == -1) {
+							EMIT_DEC_A(out);
+						} else {
+							EMIT_ADD_A_IMM(out, (unsigned)arg);
+						}
+					} else if (bt == T_LONG) {
+						EMIT_LD_BC_IMM(out, (unsigned)arg);
+						EMIT_XOR_A(out);
+						EMIT_ADD_HL_BC(out);
+						EMIT_ADC_A_E(out);
+						EMIT_LD_E_A(out);
+					} else {
+						if (bt == T_WORD) {
+							EMIT_SIS_SUFFIX(out);
+						}
+						if (arg == 1) {
+							EMIT_INC_HL(out);
+						} else if (arg == -1) {
+							EMIT_DEC_HL(out);
+						} else {
+							out -= L_SIS_SUFFIX;
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							if (bt == T_WORD) {
+								EMIT_SIS_SUFFIX(out);
+							}
+							EMIT_ADD_HL_BC(out);
+						}
 					}
-					EMIT_ADD_HL_BC(out);
 				}
 				break;
 			case IR_SUB_CONST:
@@ -3001,11 +3547,13 @@ void assemble(void) {
 				break;
 			case IR_BZ:
 				expr++;
+				bt = convert_to_zf(bt, true);
 				resolve_later(out + 1 - outstart, arg);
 				EMIT_JP_Z_IMM(out, 0);
 				break;
 			case IR_BNZ:
 				expr++;
+				bt = convert_to_zf(bt, true);
 				resolve_later(out + 1 - outstart, arg);
 				EMIT_JP_NZ_IMM(out, 0);
 				break;
@@ -3014,22 +3562,72 @@ void assemble(void) {
 				EMIT_CALL_IMM(out, TI__strlen);
 				EMIT_POP_BC(out);
 				break;
+			case IR_STORE:
+				expr++;
+				if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
+					bt = convert_flag_to_char(bt);
+				} else if (arg == T_CHAR) {
+					EMIT_LD_IND_HL_A(out);
+					break;
+				}
+				if (arg == T_CHAR) {
+					EMIT_LD_IND_HL_C(out);
+				} else if (arg == T_WORD) {
+					EMIT_LD_IND_HL_C(out);
+					EMIT_INC_HL(out);
+					EMIT_LD_IND_HL_B(out);
+					EMIT_LD_H_B(out);
+					EMIT_LD_L_C(out);
+					bt = T_WORD;
+				} else if (arg == T_LONG) {
+					if (bt == T_LONG) {
+						EMIT_LD_IND_HL_BC(out);
+						EMIT_LD_DE_IND_HL(out);
+					} else {
+						EMIT_LD_IND_HL_DE(out);
+					}
+					EMIT_INC_HL(out);
+					EMIT_INC_HL(out);
+					EMIT_INC_HL(out);
+					if (bt != T_LONG) {
+						EMIT_XOR_A(out);
+					}
+					EMIT_LD_IND_HL_A(out);
+					EMIT_EX_DE_HL(out);
+					if (bt == T_LONG) {
+						EMIT_LD_E_A(out);
+					}
+				} else {
+					EMIT_LD_IND_HL_DE(out);
+					EMIT_EX_DE_HL(out);
+				}
+				break;
+			case IR_STRCPY:
+				EMIT_PUSH_BC(out);
+				EMIT_PUSH_HL(out);
+				EMIT_CALL_IMM(out, TI__strcpy);
+				EMIT_POP_HL(out);
+				EMIT_POP_BC(out);
+				break;
 			case IR_DEFINE_FUNCTION:
 				expr++;
 				expr++;
 				break;
 			default:
+#ifdef PLATFORM_DESKTOP
 				printf("Invalid IR code: %X\n", op);
-				//error("Internal: Invalid intermediate representation code");
+#endif
+				error("Internal: Invalid IR code");
 				break;
 		}
 	}
 }
 
 int main(int argc, char **argv) {
+	unsigned int exprlen, datalen;
 #ifdef PLATFORM_DESKTOP
+	unsigned int bufferlen;
 	FILE *fd;
-	unsigned int exprlen, datalen, bufferlen;
 	char *buffer;
 	_ptr oldopcode;
 	if (argc < 2) {
@@ -3112,7 +3710,7 @@ int main(int argc, char **argv) {
 					int arglen;
 					i++;
 					nargs--;
-					if (exprstart[i] > 65536 && exprstart[i] < -65536llu) {
+					if (exprstart[i] > 65536 && -exprstart[i] < 65536) {
 						arglen = sprintf(&buffer[bufferlen], "$%llX", exprstart[i]);
 					} else if (exprstart[i] >= -65536llu) {
 						arglen = sprintf(&buffer[bufferlen], "-%llu", -exprstart[i]);
@@ -3173,7 +3771,7 @@ int main(int argc, char **argv) {
 		}
 		assemble();
 		postassemble();
-		if ((fd = fopen(argv[3], "w")) == NULL) {
+		if ((fd = fopen(argv[3], "wb")) == NULL) {
 			printf("Failed to open destination file \"%s\"\n", argv[3]);
 			return -2;
 		}
@@ -3182,16 +3780,81 @@ int main(int argc, char **argv) {
 		printf("Wrote %lld bytes of eZ80 assembly to \"%s\"\n", out-outstart, argv[3]);
 	}
 #else
+#define OUT_BUFFER_LOC 0xD52C00
+#define EXPR_BUFFER_LOC (OUT_BUFFER_LOC+0x8000)
+
 #ifdef BOS_BUILD
+	void *fd;
 	if (argc < 2) {
 		gui_PrintLine("Usage: bcc src [bin]");
 		return 0;
 	}
-#else
-	if (argc < 2) {
-		os_PutStrFull("Usage: bcc src [bin]");
-		return 0;
+	if ((fd = fs_OpenFile(argv[1])) == -1) {
+		gui_PrintLine("Source file not found.");
+		return -1;
 	}
+	srcdata = fs_GetFDPtr(fd);
+	srclen = fs_GetFDLen(fd);
+	expr = exprstart = EXPR_BUFFER_LOC;
+	precompile();
+	compile();
+	postcompile();
+	exprlen = data_start - exprstart;
+	datalen = expr - data_start;
+	outstart = out = OUT_BUFFER_LOC;
+	assemble();
+	postassemble();
+	if ((fd = fs_CreateFile(argv[2], 0, out-outstart)) == -1) {
+		gui_PrintLine("Failed to create output file.");
+		return -2;
+	}
+	if ((fd = fs_WriteRaw(outstart, out-outstart, 1, fd, 0)) == -1) {
+		gui_PrintLine("Failed to write output file.");
+		return -2;
+	}
+	gui_Print("Finished. Output ");
+	gui_PrintUInt(out-outstart, 0);
+	gui_PrintLine(" bytes");
+#else
+	uint8_t fd;
+	gfx_Begin();
+	console_printline("Beck's C Compiler");
+	if (argc < 2) {
+		console_printline("Usage: \"src bin\":prgmBCC");
+		goto endmain;
+	}
+	console_printline("Compiling");
+	gfx_PrintString(argv[1]);
+	if ((fd = ti_Open(argv[1], "r"))) {
+		srcdata = ti_GetDataPtr(fd);
+		srclen = ti_GetSize(fd);
+		ti_Close(fd);
+	} else {
+		console_printline("Source file not found.");
+		goto endmain;
+	}
+	expr = exprstart = EXPR_BUFFER_LOC;
+	precompile();
+	compile();
+	postcompile();
+	exprlen = data_start - exprstart;
+	datalen = expr - data_start;
+	outstart = out = OUT_BUFFER_LOC;
+	assemble();
+	postassemble();
+	if ((fd = ti_OpenVar(argv[2], "w", 6))) {
+		ti_Write(outstart, out-outstart, 1, fd);
+		ti_SetArchiveStatus(1, fd);
+		ti_Close(fd);
+		console_printline("Finished. Output ");
+		gfx_PrintUInt(out-outstart, 0);
+		gfx_PrintString(" bytes");
+	} else {
+		console_printline("Failed to create output file.");
+	}
+endmain:;
+	while (!os_GetCSC());
+	gfx_End();
 #endif
 #endif
 	return 0;

@@ -7,9 +7,25 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug",
+            "name": "Debug u64.c",
             "program": "${workspaceFolder}/bcc.exe",
-            "args": ["examples/hello_world/hello.c", "examples/hello_world/hello.asm", "examples/hello_world/hello.bin"],
+            "args": ["examples/u64/u64.c", "examples/u64/u64.asm", "examples/u64/u64.bin"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug fib.c",
+            "program": "${workspaceFolder}/bcc.exe",
+            "args": ["examples/fib/fib.c", "examples/fib/fib.asm", "examples/fib/fib.bin"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug hello.c",
+            "program": "${workspaceFolder}/bcc.exe",
+            "args": ["examples/hello/hello.c", "examples/hello/hello.asm", "examples/hello/hello.bin"],
             "cwd": "${workspaceFolder}"
         }
     ]

@@ -1,5 +1,5 @@
 
-void os_PutStrLine() = 0x21d30;
+#include "include/tios.h"
 
 int testfunction(int a, int b, int c) {
 	return c * a + b;
