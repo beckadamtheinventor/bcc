@@ -576,7 +576,7 @@ void tk_next(void) {
 		}
 		tk = getchar();
 	}
-	if (tk && !(tk == ';' || tk == ',' || tk == '~' || tk == ';' || tk == '{' || tk == '}' || tk == '(' || tk == ')' || tk == '[' || tk == ']' || tk == ',' || tk == ':')) {
+	if (tk) {
 		tk2 = peekchar();
 		if (tk == '/' && tk2 == '/') {
 			while (tk && tk != '\n') {
@@ -841,7 +841,7 @@ void tk_next(void) {
 					*ptr++ = tk2;
 				}
 			}
-		} else {
+		} else if (!(tk == ';' || tk == ',' || tk == '~' || tk == ';' || tk == '{' || tk == '}' || tk == '(' || tk == ')' || tk == '[' || tk == ']' || tk == ',' || tk == ':')) {
 #ifdef PLATFORM_DESKTOP
 			printf("tk = \"%c\" 0x%X\n", tk, tk);
 #endif
@@ -1856,8 +1856,11 @@ void compile(void) {
 						error("Missing open brace in function declaration");
 					}
 				}
-				tk_next();
 				// printf("Function start\n");
+
+				do {
+					tk_next();
+				} while (tk == ';');
 				while (tksym != NULL && tkvaltype == T_TYPEDEF) {
 					bt = tkval;
 					tk_next();
@@ -1902,6 +1905,7 @@ void compile(void) {
 						sym->value = stackdepth;
 						if (tk == TK_ASSIGN) {
 							tk_next();
+							// printf("tk=0x%X\"%c\"\n", tk, tk);
 							if (tk == TK_NUM) {
 								if (sym->valtype & T_INLINE_DATA) {
 									error("Invalid local initializer for inline data local");
@@ -1965,6 +1969,7 @@ void compile(void) {
 							} else {
 								error("Invalid local initializer");
 							}
+							tk_next();
 						}
 						if (tk == ',') {
 							tk_next();
@@ -1973,7 +1978,6 @@ void compile(void) {
 							}
 						}
 					}
-					tk_next();
 				}
 				*++expr = IR_ENTER;
 				*++expr = stackdepth;
@@ -3867,14 +3871,21 @@ int main(int argc, char **argv) {
 					*out++ = ';';
 					*out++ = '\n';
 					ptr++;
+				} else if (*ptr == 0x6) { // token string for open brace is 0xC1 (TI ASCII) and we need ASCII
+					*out++ = '[';
+					ptr++;
 				} else if ((unsigned)*ptr-'A' < 26) { // convert uppercase to lowercase
-					*out++ = *ptr + 'a' - 'A';
+					*out++ = *ptr++ + 'a' - 'A';
 				} else if (*ptr == 'A'+27) { // convert Theta to underscore
 					*out++ = '_';
+					ptr++;
 				} else { // otherwise use the token string
 					char *s = ti_GetTokenString(&ptr, NULL, &slen);
 					if (slen > 0) {
 						memcpy(out, s, slen);
+						if ((unsigned)*out-'A' < 26) { // support While token and whatnot
+							*out = *out + 'a' - 'A';
+						}
 						out += slen;
 					}
 				}
