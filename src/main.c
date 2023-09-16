@@ -248,7 +248,12 @@ typedef struct _symbol {
 } symbol;
 
 bool tkisconst = true;
-uint8_t tk, tkvaltype, outformat = FMT_CE;
+uint8_t tk, tkvaltype;
+#ifdef BOS_BUILD
+uint8_t outformat = FMT_BOS;
+#else
+uint8_t outformat = FMT_CE;
+#endif
 symbol *tksym = NULL;
 char *tkname;
 unsigned int tknamelen;
@@ -310,7 +315,7 @@ void error(const char *s) {
 	gui_PrintLine(s);
 	if (lno > 0) {
 		gui_Print("Error on line ");
-		gui_PrintUInt(lno);
+		gui_PrintInt(lno);
 	}
 	sys_WaitKeyCycle();
 #else
@@ -1517,6 +1522,19 @@ void statement(void) {
 		if (tk != ';') {
 			expression(TK_ASSIGN);
 		}
+		if (tkisconst) {
+			if (tkvaltype == T_STR) {
+				*++expr = IR_IMM_PROG_OFFSET;
+				*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+			} else if (tkvaltype == T_LONG) {
+				*++expr = IR_IMM_32;
+				*++expr = tkval;
+				*++expr = tkval >> 24;
+			} else {
+				*++expr = IR_IMM;
+				*++expr = tkval;
+			}
+		}
 		*++expr = IR_LEAVE;
 		if (tk != ';') {
 			error("Missing semicolon");
@@ -1631,7 +1649,7 @@ void compile(void) {
 				if (srcoffset-i <= 1) {
 					error("Invalid #include file name");
 				}
-				if ((fname = malloc(srcoffset+1-i)) == NULL) {
+				if ((fname = _malloc(srcoffset+1-i)) == NULL) {
 					error("Out of memory");
 				}
 				memcpy(fname, &srcdata[i], srcoffset-i);
@@ -1653,7 +1671,7 @@ void compile(void) {
 			fseek(fd, 0, 2);
 			srclen = ftell(fd);
 			fseek(fd, 0, 0);
-			if ((srcdata = malloc(srclen)) == NULL) {
+			if ((srcdata = _malloc(srclen)) == NULL) {
 				error("Out of memory");
 			}
 			fread(srcdata, srclen, 1, fd);
@@ -3648,7 +3666,7 @@ int main(int argc, char **argv) {
 	fread(srcdata, srclen, 1, fd);
 	fclose(fd);
 
-	if ((expr = exprstart = malloc(IR_OUTPUT_SIZE * sizeof(_ptr))) == NULL) {
+	if ((expr = exprstart = _malloc(IR_OUTPUT_SIZE * sizeof(_ptr))) == NULL) {
 		printf("Failed to malloc %u bytes of space for IR output.\n", (unsigned int)(IR_OUTPUT_SIZE * sizeof(int32_t)));
 		return 1;
 	}
@@ -3661,7 +3679,7 @@ int main(int argc, char **argv) {
 	datalen = expr - data_start;
 	printf("Compiled %u bytes of IR.\n", (unsigned int)(exprlen*sizeof(_int)));
 
-	if ((buffer = malloc(exprlen * 32 + datalen * 4)) == NULL) {
+	if ((buffer = _malloc(exprlen * 32 + datalen * 4)) == NULL) {
 		printf("Failed to malloc %u bytes of space for file output buffer.\n", exprlen * 40);
 		return 1;
 	}
@@ -3765,7 +3783,7 @@ int main(int argc, char **argv) {
 	printf("Wrote %u bytes of IR assembly to \"%s\".\n", bufferlen, argv[2]);
 
 	if (argc >= 4) {
-		if ((out = outstart = malloc(OUTPUT_BUFFER_SIZE)) == NULL) {
+		if ((out = outstart = _malloc(OUTPUT_BUFFER_SIZE)) == NULL) {
 			printf("Failed to malloc %u bytes of space for output buffer\n", OUTPUT_BUFFER_SIZE);
 			return 1;
 		}
@@ -3813,7 +3831,7 @@ int main(int argc, char **argv) {
 		return -2;
 	}
 	gui_Print("Finished. Output ");
-	gui_PrintUInt(out-outstart, 0);
+	gui_PrintInt(out-outstart);
 	gui_PrintLine(" bytes");
 #else
 	uint8_t fd;
