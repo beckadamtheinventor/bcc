@@ -3835,6 +3835,11 @@ int main(int argc, char **argv) {
 	gui_PrintLine(" bytes");
 #else
 	uint8_t fd;
+
+    // Enable lowercase
+    asm("ld iy, 0D00080h");
+    asm("set 3, (iy+024h)");
+
 	gfx_Begin();
 	console_printline("Beck's C Compiler");
 	if (argc < 2) {
@@ -3847,7 +3852,44 @@ int main(int argc, char **argv) {
 		srcdata = ti_GetDataPtr(fd);
 		srclen = ti_GetSize(fd);
 		ti_Close(fd);
-	} else {
+	} /*else if ((fd = ti_OpenVar(argv[1], "r", 5))) {
+		srcdata = ti_GetDataPtr(fd);
+		srclen = ti_GetSize(fd);
+		ti_Close(fd);
+		console_printline("Detokenizing program source");
+		if ((fd = ti_Open("_bcctmp_", "w"))) {
+			uint8_t *ptr = srcdata;
+			uint8_t *end = &srcdata[srclen];
+			outstart = out = OUT_BUFFER_LOC;
+			while (ptr < end) {
+				unsigned int slen;
+				if (*ptr == 0x3F) {
+					*out++ = ';';
+					*out++ = '\n';
+					ptr++;
+				} else {
+					char *s = ti_GetTokenString(&ptr, NULL, &slen);
+					if (slen > 0) {
+						memcpy(out, s, slen);
+						out += slen;
+					}
+				}
+			}
+			if (!ti_ArchiveHasRoom(out-outstart)) {
+				ti_Close(fd);
+				console_printline("Not enough space in archive");
+				console_printline("Please run GarbageCollect");
+				goto endmain;
+			}
+			ti_Write(outstart, out-outstart, 1, fd);
+			ti_SetArchiveStatus(1, fd);
+			ti_Close(fd);
+			console_printline("Finished Detokenizing");
+		} else {
+			console_printline("Failed to open temp appvar _bcctmp_");
+			goto endmain;
+		}
+	}*/ else {
 		console_printline("Source file not found.");
 		goto endmain;
 	}
@@ -3860,6 +3902,7 @@ int main(int argc, char **argv) {
 	outstart = out = OUT_BUFFER_LOC;
 	assemble();
 	postassemble();
+	ti_SetGCBehavior(gfx_End, gfx_Begin);
 	if ((fd = ti_OpenVar(argv[2], "w", 6))) {
 		ti_Write(outstart, out-outstart, 1, fd);
 		ti_SetArchiveStatus(1, fd);
@@ -3870,6 +3913,7 @@ int main(int argc, char **argv) {
 	} else {
 		console_printline("Failed to create output file.");
 	}
+	ti_Delete("_bcctmp_");
 endmain:;
 	while (!os_GetCSC());
 	gfx_End();
