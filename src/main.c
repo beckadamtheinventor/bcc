@@ -3852,7 +3852,7 @@ int main(int argc, char **argv) {
 		srcdata = ti_GetDataPtr(fd);
 		srclen = ti_GetSize(fd);
 		ti_Close(fd);
-	} /*else if ((fd = ti_OpenVar(argv[1], "r", 5))) {
+	} else if ((fd = ti_OpenVar(argv[1], "r", 5))) {
 		srcdata = ti_GetDataPtr(fd);
 		srclen = ti_GetSize(fd);
 		ti_Close(fd);
@@ -3863,11 +3863,15 @@ int main(int argc, char **argv) {
 			outstart = out = OUT_BUFFER_LOC;
 			while (ptr < end) {
 				unsigned int slen;
-				if (*ptr == 0x3F) {
+				if (*ptr == 0x3F) { // convert TI newlines to semicolon followed by ASCII newline
 					*out++ = ';';
 					*out++ = '\n';
 					ptr++;
-				} else {
+				} else if ((unsigned)*ptr-'A' < 26) { // convert uppercase to lowercase
+					*out++ = *ptr + 'a' - 'A';
+				} else if (*ptr == 'A'+27) { // convert Theta to underscore
+					*out++ = '_';
+				} else { // otherwise use the token string
 					char *s = ti_GetTokenString(&ptr, NULL, &slen);
 					if (slen > 0) {
 						memcpy(out, s, slen);
@@ -3883,13 +3887,16 @@ int main(int argc, char **argv) {
 			}
 			ti_Write(outstart, out-outstart, 1, fd);
 			ti_SetArchiveStatus(1, fd);
+			ti_Rewind(fd);
+			srcdata = ti_GetDataPtr(fd);
+			srclen = ti_GetSize(fd);
 			ti_Close(fd);
 			console_printline("Finished Detokenizing");
 		} else {
 			console_printline("Failed to open temp appvar _bcctmp_");
 			goto endmain;
 		}
-	}*/ else {
+	} else {
 		console_printline("Source file not found.");
 		goto endmain;
 	}
