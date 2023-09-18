@@ -3,7 +3,7 @@
 #define __IR_DATA_H__
 
 const int8_t IR_ARGS[IR_INVALID_OPCODE] = {
-	0, 1, 1, 2, 1, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, 1, 1,
+	0, 1, 1, 2, 2, 1, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, 1, 1,
 	1, 0, 0, 2, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -15,6 +15,7 @@ const char *IR_STRINGS[IR_INVALID_OPCODE] = {
 	"IMM",
 	"IMM_PROG_OFFSET",
 	"IMM_32",
+	"IMM_32_SEC",
 	"IMM_8",
 	"PUSH",
 	"PUSH_SEC",

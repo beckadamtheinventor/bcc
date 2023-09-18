@@ -111,8 +111,8 @@ enum {
 	T_NUM,
 	T_INT = T_NUM,
 	T_LONG,
-	T_TYPEDEF,
 	T_STRUCT,
+	T_TYPEDEF,
 	T_BOOL,
 	T_STR,
 	T_BOOL_CF = 26,
@@ -129,6 +129,7 @@ enum {
 	IR_IMM, // load immediate 24-bit value
 	IR_IMM_PROG_OFFSET, // load immediate 24-bit value offset of expr from exprstart
 	IR_IMM_32, // load immediate 32-bit value
+	IR_IMM_32_SEC, // load immediate 32-bit value into secondary register
 	IR_IMM_8, // load immediate 8-bit value
 	IR_PUSH, // push primary register
 	IR_PUSH_SEC, // push secondary register
@@ -210,7 +211,7 @@ enum {
 	
 	IR_STRLEN, // get strlen of primary register, storing into primary register
 	IR_STRCPY, // strcpy(primary, secondary)
-	IR_STORE, // store arg bytes of secondary to address in primary
+	IR_STORE, // store arg bytes of primary to address in secondary
 	IR_SET_ONE_IF_NOT_ZERO, // set primary to 1 if primary is not zero
 	IR_DEFINE_FUNCTION, // Define function here. arg0 is symbol, arg1 is number of arguments
 
@@ -239,9 +240,8 @@ enum {
 typedef struct _symbol {
 	uint8_t symtype, valtype;
 	unsigned int datalen;
-	unsigned int value;
-	uint8_t valueupper;
-	unsigned int resolved_value;
+	uint32_t value;
+	uint32_t resolved_value;
 	struct _symbol *prev, *next;
 	uint16_t hash;
 	char name[1];
@@ -285,7 +285,7 @@ typedef struct _function_argument_stack_item {
 function_argument_stack_item function_argument_stack[FUNCTION_ARGUMENT_STACK_SIZE];
 unsigned int function_argument_stack_sp;
 char *tkvalstr;
-int32_t tkval;
+uint32_t tkval;
 _ptr *resolvestack, *resolvestackstart, *expr, *exprstart, *data_start, *data_resolve_stack;
 _int data_resolve_sp = 0;
 uint8_t *out, *outstart;
@@ -740,7 +740,7 @@ void tk_next(void) {
 			}
 			tk = TK_ID;
 		} else if (tk == '0' && (tk2&~0x20) == 'X') {
-			int num = 0;
+			uint32_t num = 0;
 			srcoffset++;
 			tk = getchar();
 			while ((unsigned)tk-'0' < 10 || (unsigned)(tk&~0x20)-'A' < 6) {
@@ -753,7 +753,7 @@ void tk_next(void) {
 			tkisconst = true;
 			srcoffset--;
 		} else if ((unsigned)tk-'0' < 10) {
-			int num = 0;
+			uint32_t num = 0;
 			do {
 				num = num * 10 + tk - '0';
 			} while ((unsigned)(tk = getchar())-'0' < 10);
@@ -848,7 +848,9 @@ void tk_next(void) {
 			error("Invalid token");
 		}
 	}
-	// printf("tk = %X \"%c\"\n", tk, tk);
+#ifdef DEBUG
+	printf("tk = %X \"%c\"\n", tk, tk);
+#endif
 }
 
 void expression(uint8_t level) {
@@ -1008,7 +1010,11 @@ void expression(uint8_t level) {
 			*++expr = sym;
 			*++expr = IR_ADJ;
 			*++expr = tmp;
-			tkvaltype = sym->valtype;
+			if ((sym->valtype & T_MASK) == T_STR) {
+				tkvaltype = (sym->valtype & ~T_MASK) | T_CHAR;
+			} else {
+				tkvaltype = sym->valtype;
+			}
 			tkisconst = false;
 		} else if (sym->symtype & SYM_LOCAL) {
 			// local value
@@ -1034,6 +1040,7 @@ void expression(uint8_t level) {
 			tkvaltype = sym->valtype;
 			tkisconst = false;
 		} else {
+			// printf("0x%X \"%s\"\n", sym->symtype, sym->name);
 			error("Invalid variable type");
 		}
 		while (tk == '[') {
@@ -1059,7 +1066,11 @@ void expression(uint8_t level) {
 					tkval = primary + tkval * (tkvaltype & T_MASK);
 				} else if (primaryisconst) { // constant[var]
 					*++expr = IR_MUL_CONST;
-					*++expr = tkvaltype & T_MASK;
+					if ((tkvaltype & T_MASK) >= T_TYPEDEF) {
+						*++expr = 1;
+					} else {
+						*++expr = tkvaltype & T_MASK;
+					}
 					*++expr = IR_ADD_CONST;
 					*++expr = primary; // primary is not destroyed if the expression is not constant
 					tkisconst = false;
@@ -1068,7 +1079,7 @@ void expression(uint8_t level) {
 					*++expr = IR_ADD_CONST;
 					*++expr = tkval * (tkvaltype & T_MASK);
 					tkisconst = false;
-				} else if ((primarytype & T_MASK) > 1) {
+				} else if ((primarytype & T_MASK) > 1 && (primarytype & T_MASK) < T_TYPEDEF) {
 					*++expr = IR_MUL_CONST;
 					*++expr = primarytype & T_MASK;
 					*++expr = IR_ADD;
@@ -1184,14 +1195,22 @@ void expression(uint8_t level) {
 			}
 			*++expr = (tmp == TK_INC) ? IR_INC : IR_DEC;
 			*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
-			*++expr = sym->value;
+			if ((sym->value & T_MASK) == T_STR) {
+				*++expr = (sym->value & ~T_MASK) | T_CHAR;
+			} else {
+				*++expr = sym->value;
+			}
 			*++expr = tkvaltype & T_MASK;
 		} else {
 			error("Invalid value increment/decrement");
 		}
 	} else {
-		//printf("tk=0x%X \"%c\"\n", tk, tk);
+		// printf("tk=0x%X \"%c\"\n", tk, tk);
 		error("Invalid expression");
+	}
+
+	if (tk < level) {
+		return;
 	}
 
 	primary = tkval;
@@ -1204,6 +1223,8 @@ void expression(uint8_t level) {
 			if (primaryisptr) {
 				if (!primaryisconst) {
 					*expr = IR_PUSH;
+				} else {
+					expr--;
 				}
 				d = expr;
 				tk_next();
@@ -1239,12 +1260,15 @@ void expression(uint8_t level) {
 						*++expr = IR_STORE_GLOBAL;
 						*++expr = primary;
 					} else { // indirect var = var
-						*++expr = IR_EX_SEC_PRI;
-						*++expr = IR_POP;
+						*++expr = IR_POP_SEC;
 						*++expr = IR_STORE;
 					}
 				}
-				*++expr = primarytype & T_MASK;
+				if ((primarytype & T_MASK) == T_STR) {
+					*++expr = T_CHAR;
+				} else {
+					*++expr = primarytype & T_MASK;
+				}
 			} else {
 				if (sym == NULL) {
 					error("Invalid variable assignment");
@@ -1406,12 +1430,23 @@ void expression(uint8_t level) {
 					primaryisconst = false;
 				}
 			} else {
-				if (primarytype == T_LONG) {
-					*++expr = IR_POP_32;
+				if (tkisconst) {
+					if (primarytype == T_LONG) {
+						*expr = IR_IMM_32_SEC; // load secondary instead of push / load pri / pop sec / ex
+						*++expr = tkval;
+						*++expr = tkval >> 24;
+					} else {
+						*expr = tmp + IR_OR_CONST - TK_OR; // constant operation instead of push / load pri / pop sec / ex / operation
+						*++expr = tkval;
+					}
 				} else {
-					*++expr = IR_POP_SEC;
+					if (primarytype == T_LONG) {
+						*++expr = IR_POP_32;
+					} else {
+						*++expr = IR_POP_SEC;
+					}
+					*++expr = tmp + IR_OR - TK_OR;
 				}
-				*++expr = tmp + IR_OR - TK_OR;
 			}
 		} else if (tk == TK_INC || tk == TK_DEC) {
 			if (*expr >= IR_LOAD_CHAR && *expr <= IR_LOAD_LONG) {
@@ -1437,26 +1472,148 @@ void expression(uint8_t level) {
 
 void compile(void);
 
-void statement(void) {
+int statement(int stackdepth) {
 	_ptr *a, *b;
-	if (tk == TK_IF) {
+	if (tksym != NULL && tksym->valtype == T_TYPEDEF) {
+		symbol *sym;
+		uint8_t bt = tksym->value;
+		tk_next();
+		while (tk != ';') {
+			uint8_t ty = bt;
+			while (tk == TK_MUL) {
+				tk_next();
+				ty += T_PTR;
+			}
+			if (tk != TK_ID) {
+				error("Invalid local declaration");
+			}
+			if (tksym != NULL && tksym->symtype & SYM_LOCAL) {
+				error("Duplicate local declaration");
+			}
+			sym = add_sym(tkname, tknamelen, SYM_LOCAL, ty, 0);
+			tk_next();
+			if (tk == '[') {
+				tk_next();
+				if (tk == TK_NUM) {
+					sym->datalen = tkval;
+				} else if (tksym != NULL) {
+					if (!(tksym->symtype & SYM_CONSTANT)) {
+						error("Local array length initializer must be constant");
+					}
+					sym->datalen = tksym->value;
+				} else {
+					error("Invalid local declaration");
+				}
+				stackdepth -= sym->datalen * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
+				sym->valtype |= T_INLINE_DATA;
+				tk_next();
+				if (tk != ']') {
+					error("Missing closing bracket");
+				}
+				tk_next();
+			} else if ((ty & T_MASK) <= T_LONG) {
+				stackdepth -= (ty & T_MASK);
+			}
+			sym->value = stackdepth;
+			if (tk == TK_ASSIGN) {
+				tk_next();
+				// printf("tk=0x%X\"%c\"\n", tk, tk);
+				if (tk == TK_NUM) {
+					if (sym->valtype & T_INLINE_DATA) {
+						error("Invalid local initializer for inline data local");
+					}
+					if ((sym->valtype & T_MASK) == T_LONG) {
+						*++expr = IR_IMM_32;
+						*++expr = tkval;
+						*++expr = tkval >> 24;
+					} else {
+						*++expr = IR_IMM;
+						*++expr = tkval;
+					}
+					*++expr = IR_STORE_LOCAL;
+					*++expr = sym->value;
+					*++expr = sym->valtype & T_MASK;
+					tk_next();
+				} else if (tk == TK_STR) {
+					*++expr = IR_IMM_PROG_OFFSET;
+					*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+					if (sym->valtype & T_INLINE_DATA) {
+						*++expr = IR_EX_SEC_PRI;
+						*++expr = IR_LEA_LOCAL;
+						*++expr = signext(sym->value);
+						*++expr = IR_STRCPY;
+					} else if ((sym->valtype & T_MASK) == T_STR) {
+						*++expr = IR_STORE_LOCAL;
+						*++expr = sym->value;
+						*++expr = sym->valtype & T_MASK;
+					} else {
+						error("Invalid local type for string initializer");
+					}
+					tk_next();
+				} else if (tk == '{') {
+					unsigned int counter = 0;
+					tk_next();
+					do {
+						if (tk == TK_NUM) {
+							if ((sym->valtype & T_MASK) == T_LONG) {
+								*++expr = IR_IMM_32;
+								*++expr = tkval;
+								*++expr = tkval >> 24;
+							} else {
+								*++expr = IR_IMM;
+								*++expr = tkval;
+							}
+							*++expr = sym->value;
+							*++expr = sym->valtype & T_MASK;
+						} else if (tk == TK_STR) {
+							if ((sym->valtype & T_MASK) == T_LONG) {
+								error("Invalid local type for string array initializer");
+							}
+							*++expr = IR_IMM_PROG_OFFSET;
+							*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+						} else {
+							error("Invalid value in local initializer array");
+						}
+						counter++;
+						tk_next();
+						if (tk == ',') {
+							tk_next();
+							if (tk == '}') {
+								error("Expected value following comma in local initializer array");
+							}
+						}
+					} while (tk != '}');
+				} else {
+					error("Invalid local initializer");
+				}
+			}
+			if (tk == ',') {
+				tk_next();
+				if (tk == ';') {
+					error("Missing local declaration following comma");
+				}
+			}
+		}
+	} else if (tk == TK_IF) {
 		tk_next();
 		if (tk != '(') {
 			error("Missing open parenthesis");
 		}
+		tk_next();
 		expression(TK_ASSIGN);
 		if (tk != ')') {
 			error("Missing closing parenthesis");
 		}
+		tk_next();
 		*++expr = IR_BZ;
 		b = ++expr;
-		statement();
+		stackdepth = statement(stackdepth);
 		if (tk == TK_ELSE) {
 			*b = make_anon_sym(expr + 3 - exprstart, T_PTR);
 			*++expr = IR_JMP;
 			b = ++expr;
 			tk_next();
-			statement();
+			stackdepth = statement(stackdepth);
 		}
 		*b = make_anon_sym(expr + 1 - exprstart, T_PTR);
 	} else if (tk == TK_WHILE) {
@@ -1476,10 +1633,10 @@ void statement(void) {
 		if (tk == '{') {
 			tk_next();
 			while (tk != '}') {
-				statement();
+				stackdepth = statement(stackdepth);
 			}
 		} else if (tk != ';') {
-			statement();
+			stackdepth = statement(stackdepth);
 		}
 		tk_next();
 		*++expr = IR_JMP;
@@ -1491,10 +1648,10 @@ void statement(void) {
 		if (tk == '{') {
 			tk_next();
 			while (tk != '}') {
-				statement();
+				stackdepth = statement(stackdepth);
 			}
 		} else if (tk != ';') {
-			statement();
+			stackdepth = statement(stackdepth);
 		}
 		tk_next();
 		if (tk != TK_WHILE) {
@@ -1505,8 +1662,6 @@ void statement(void) {
 			error("Missing open parenthesis");
 		}
 		tk_next();
-		*++expr = IR_BZ;
-		b = ++expr;
 		expression(TK_ASSIGN);
 		if (tk != ')') {
 			error("Missing closing parenthesis");
@@ -1516,7 +1671,8 @@ void statement(void) {
 			error("Missing semicolon");
 		}
 		tk_next();
-		*b = make_anon_sym(a - exprstart, T_PTR);
+		*++expr = IR_BZ;
+		*++expr = make_anon_sym(a - exprstart, T_PTR);
 	} else if (tk == TK_RETURN) {
 		tk_next();
 		if (tk != ';') {
@@ -1541,11 +1697,13 @@ void statement(void) {
 		}
 		tk_next();
 	} else if (tk == '{') {
+		save_sym_stack();
 		tk_next();
 		while (tk != '}') {
-			statement();
+			stackdepth = statement(stackdepth);
 		}
 		tk_next();
+		free_local_symbols();
 	} else if (tk == ';') {
 		tk_next();
 	} else {
@@ -1555,6 +1713,7 @@ void statement(void) {
 		}
 		tk_next();
 	}
+	return stackdepth;
 }
 
 void precompile(void) {
@@ -1572,13 +1731,14 @@ void precompile(void) {
 	}
 	memset(symtable, 0, sizeof(symbol));
 	memset(localsymstack, 0, sizeof(symbol*));
+	add_sym("bool", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
 	add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
 	add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
 	add_sym("char", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
 	add_sym("short", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
 	add_sym("int", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
 	add_sym("long", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
-	add_sym("uint8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
+	add_sym("uint8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
 	add_sym("uint16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
 	add_sym("uint24_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
 	add_sym("uint32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
@@ -1604,6 +1764,7 @@ void postcompile(void) {
 		char *ptr = (char*)data_resolve_stack[--data_resolve_sp];
 		symbol *sym = data_resolve_stack[--data_resolve_sp];
 		// printf("0x%llX 0x%llX\n", expr-exprstart, data_start-exprstart);
+
 		sym->value = expr - exprstart;
 		for (unsigned int i = 0; i < len; i++) {
 			*expr++ = ptr[i];
@@ -1614,6 +1775,7 @@ void postcompile(void) {
 void compile(void) {
 	symbol *sym;
 	int argdepth, stackdepth, nargs;
+	_ptr *stackdepthloc;
 	uint8_t bt, ty;
 	int i;
 	lno = 1;
@@ -1849,144 +2011,24 @@ void compile(void) {
 							error("Expected semicolon following function assignment value");
 						}
 						goto nexttoken;
-					} else if (tk == ';') {
-						free_local_symbols();
-						goto nexttoken;
-					} else {
+					} else if (tk != ';') {
 						error("Missing open brace in function declaration");
 					}
-				}
-				// printf("Function start\n");
+				} else {
+					tk_next();
+					// printf("Function start\n");
 
-				do {
-					tk_next();
-				} while (tk == ';');
-				while (tksym != NULL && tkvaltype == T_TYPEDEF) {
-					bt = tkval;
-					tk_next();
-					while (tk != ';') {
-						ty = bt;
-						while (tk == TK_MUL) {
-							tk_next();
-							ty += T_PTR;
-						}
-						if (tk != TK_ID) {
-							error("Invalid local declaration");
-						}
-						if (tksym != NULL && tksym->symtype & SYM_LOCAL) {
-							error("Duplicate local declaration");
-						}
-						sym = add_sym(tkname, tknamelen, SYM_LOCAL, ty, 0);
-						tk_next();
-						if (tk == '[') {
-							tk_next();
-							if (tk == TK_NUM) {
-								sym->datalen = tkval;
-							} else if (tksym != NULL) {
-								if (!(tksym->symtype & SYM_CONSTANT)) {
-									error("Local array length initializer must be constant");
-								}
-								sym->datalen = tksym->value;
-							} else {
-								error("Invalid local declaration");
-							}
-							stackdepth -= sym->datalen * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
-							sym->valtype |= T_INLINE_DATA;
-							tk_next();
-							if (tk != ']') {
-								error("Missing closing bracket");
-							}
-							tk_next();
-						} else if ((ty & T_MASK) == T_LONG) {
-							stackdepth -= 4;
-						} else {
-							stackdepth -= 3;
-						}
-						sym->value = stackdepth;
-						if (tk == TK_ASSIGN) {
-							tk_next();
-							// printf("tk=0x%X\"%c\"\n", tk, tk);
-							if (tk == TK_NUM) {
-								if (sym->valtype & T_INLINE_DATA) {
-									error("Invalid local initializer for inline data local");
-								}
-								if ((sym->valtype & T_MASK) == T_LONG) {
-									*++expr = IR_IMM_32;
-									*++expr = tkval;
-									*++expr = tkval >> 24;
-								} else {
-									*++expr = IR_IMM;
-									*++expr = tkval;
-								}
-							} else if (tk == TK_STR) {
-								*++expr = IR_IMM_PROG_OFFSET;
-								*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
-								if (sym->valtype & T_INLINE_DATA) {
-									*++expr = IR_EX_SEC_PRI;
-									*++expr = IR_LEA_LOCAL;
-									*++expr = signext(sym->value);
-									*++expr = IR_STRCPY;
-								} else if ((sym->valtype & T_MASK) == T_STR) {
-									*++expr = IR_STORE_LOCAL;
-									*++expr = sym->value;
-									*++expr = sym->valtype & T_MASK;
-								} else {
-									error("Invalid local type for string initializer");
-								}
-							} else if (tk == '{') {
-								unsigned int counter = 0;
-								tk_next();
-								do {
-									if (tk == TK_NUM) {
-										if ((sym->valtype & T_MASK) == T_LONG) {
-											*++expr = IR_IMM_32;
-											*++expr = tkval;
-											*++expr = tkval >> 24;
-										} else {
-											*++expr = IR_IMM;
-											*++expr = tkval;
-										}
-										*++expr = sym->value;
-										*++expr = sym->valtype & T_MASK;
-									} else if (tk == TK_STR) {
-										if ((sym->valtype & T_MASK) == T_LONG) {
-											error("Invalid local type for string array initializer");
-										}
-										*++expr = IR_IMM_PROG_OFFSET;
-										*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
-									} else {
-										error("Invalid value in local initializer array");
-									}
-									counter++;
-									tk_next();
-									if (tk == ',') {
-										tk_next();
-										if (tk == '}') {
-											error("Expected value following comma in local initializer array");
-										}
-									}
-								} while (tk != '}');
-							} else {
-								error("Invalid local initializer");
-							}
-							tk_next();
-						}
-						if (tk == ',') {
-							tk_next();
-							if (tk == ')') {
-								error("Missing local declaration following comma");
-							}
-						}
+					*++expr = IR_ENTER;
+					*++expr = 0;
+					stackdepthloc = expr;
+					while (tk != '}') {
+						// printf("Reading function statement\n");
+						stackdepth = statement(stackdepth);
 					}
-				}
-				*++expr = IR_ENTER;
-				*++expr = stackdepth;
-				while (tk != '}') {
-					// printf("Reading function statement\n");
-					statement();
-				}
-				if (*expr != IR_EXIT && *expr != IR_LEAVE) {
-					*++expr = IR_LEAVE;
+					*stackdepthloc = stackdepth;
+					if (*expr != IR_EXIT && *expr != IR_LEAVE) {
+						*++expr = IR_LEAVE;
+					}
 				}
 				free_local_symbols();
 			} else {
@@ -2059,14 +2101,6 @@ uint8_t convert_to_zf(uint8_t bt, bool z) {
 		bt = T_BOOL_ZF;
 	}
 	if (z) {
-		if (bt == T_BOOL_NZF) {
-			EMIT_LD_A_IMM(out, 1);
-			EMIT_JR_NZ_IMM(out, L_XOR_A);
-			EMIT_XOR_A(out);
-			EMIT_OR_A(out);
-		}
-		return T_BOOL_ZF;
-	} else {
 		if (bt == T_BOOL_ZF) {
 			EMIT_LD_A_IMM(out, 1);
 			EMIT_JR_Z_IMM(out, L_XOR_A);
@@ -2074,6 +2108,14 @@ uint8_t convert_to_zf(uint8_t bt, bool z) {
 			EMIT_OR_A(out);
 		}
 		return T_BOOL_NZF;
+	} else {
+		if (bt == T_BOOL_NZF) {
+			EMIT_LD_A_IMM(out, 1);
+			EMIT_JR_NZ_IMM(out, L_XOR_A);
+			EMIT_XOR_A(out);
+			EMIT_OR_A(out);
+		}
+		return T_BOOL_ZF;
 	}
 }
 
@@ -2191,9 +2233,14 @@ void try_resolve_symbols(unsigned int offset) {
 //	printf("\n");
 }
 
+#define LOAD_HL(a) if ((unsigned)(a) == 0) {EMIT_OR_A(out); EMIT_SBC_HL_HL(out);} else if ((unsigned)(a) == -1) {EMIT_SCF(out); EMIT_SBC_HL_HL(out);} else if (!(hlisconst && hlvalue == (unsigned)(a))) { EMIT_LD_HL_IMM(out, (unsigned)(a)); } hlvalue = (a); hlisconst = true;
+#define LOAD_DE(a) if (!(deisconst && devalue == (unsigned)(a))) {EMIT_LD_DE_IMM(out, (unsigned)(a));} devalue = (a); deisconst = true;
+#define LOAD_BC(a) if (!(bcisconst && bcvalue == (unsigned)(a))) {EMIT_LD_BC_IMM(out, (unsigned)(a));} bcvalue = (a); bcisconst = true;
+
 void assemble(void) {
-	bool argispowerof2 = false;
-	int op;
+	bool argispowerof2 = false, hlisconst = false, deisconst = false, bcisconst = false;
+	unsigned int hlvalue, devalue, bcvalue;
+	int op = 0, oldopcode;
 	_ptr arg, *expr = exprstart;
 	uint8_t l, bt = T_VOID, *leaveaddress = NULL, *last_compare_ptr = NULL, *prevout = out, *prevprevout = out;
 	symbol *sym, *mainsym;
@@ -2227,7 +2274,7 @@ void assemble(void) {
 	memcpy(&outstart[errsp_offset], &addrtmp, 3);
 	EMIT_CALL_IMM(out, TI_RunIndicOn);
 	EMIT_JP_IMM(out, TI_HomeUp);
-	expr++;
+	// expr++;
 	while (1) {
 		prevprevout = prevout;
 		prevout = out;
@@ -2235,6 +2282,7 @@ void assemble(void) {
 #ifdef DEBUG
 		printf("out offset: %llu expr offset: %llu\n", out-outstart, expr-exprstart);
 #endif
+		oldopcode = op;
 		op = *expr++;
 		if (expr >= data_start) {
 			break;
@@ -2256,10 +2304,10 @@ void assemble(void) {
 				expr++;
 				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
 					out = prevprevout;
-					EMIT_LD_DE_IMM(out, (unsigned)arg);
+					LOAD_DE(arg);
 					expr++;
 				} else {
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
+					LOAD_HL(arg);
 				}
 				bt = T_INT;
 				break;
@@ -2270,8 +2318,10 @@ void assemble(void) {
 					out = prevprevout;
 					EMIT_LD_DE_IMM(out, 0);
 					expr++;
+					deisconst = false;
 				} else {
 					EMIT_LD_HL_IMM(out, 0);
+					hlisconst = false;
 				}
 				break;
 			case IR_IMM_8:
@@ -2280,6 +2330,7 @@ void assemble(void) {
 					out = prevprevout;
 					EMIT_LD_E_IMM(out, (unsigned)arg);
 					expr++;
+					deisconst = false;
 				} else {
 					EMIT_LD_A_IMM(out, (unsigned)arg);
 				}
@@ -2289,14 +2340,24 @@ void assemble(void) {
 				expr++;
 				if (expr[-2] == IR_PUSH_32 && expr[1] == IR_EX_SEC_PRI) {
 					out = prevprevout;
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
+					LOAD_BC(arg);
 					EMIT_LD_A_IMM(out, (unsigned)*expr);
 					expr++;
 				} else {
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
+					LOAD_HL(arg);
 					EMIT_LD_E_IMM(out, (unsigned)*expr);
+					deisconst = false;
 				}
 				expr++;
+				bt = T_LONG;
+				break;
+			case IR_IMM_32_SEC:
+				expr++;
+				LOAD_BC(arg);
+				EMIT_LD_A_IMM(out, (unsigned)*expr);
+				expr++;
+				bcisconst = true;
+				bcvalue = arg;
 				bt = T_LONG;
 				break;
 			case IR_PUSH:
@@ -2313,11 +2374,12 @@ void assemble(void) {
 				break;
 			case IR_PUSH_IMM_32:
 				expr++;
-				EMIT_LD_BC_IMM(out, (unsigned)arg);
+				LOAD_BC(arg);
 				EMIT_PUSH_BC(out);
 				arg = *expr++;
 				EMIT_LD_C_IMM(out, (unsigned)arg);
 				EMIT_PUSH_BC(out);
+				bcisconst = false;
 				break;
 			case IR_PUSH_32:
 				EMIT_PUSH_HL(out);
@@ -2329,31 +2391,58 @@ void assemble(void) {
 				break;
 			case IR_POP:
 				EMIT_POP_HL(out);
+				hlisconst = false;
 				break;
 			case IR_POP_SEC:
-				EMIT_POP_DE(out);
+				if (bt == T_LONG) {
+					EMIT_POP_BC(out);
+					EMIT_XOR_A(out);	
+				} else {
+					EMIT_POP_DE(out);
+				}
+				deisconst = false;
 				break;
 			case IR_POP_TER:
 				EMIT_POP_BC(out);
+				bcisconst = false;
 				break;
 			case IR_POP_32:
 				EMIT_POP_BC(out);
 				EMIT_LD_A_C(out);
 				EMIT_POP_BC(out);
+				bcisconst = false;
 				break;
 			case IR_EX_SEC_PRI:
 				bt = convert_flag_to_char(bt);
+				if (bt == T_LONG) {
+					bcisconst = false;
+				}
+				deisconst = false;
+				hlisconst = false;
 				exchage_primary_secondary(bt);
 				break;
 			case IR_CALL:
 				expr++;
-				resolve_later(out + 1 - outstart, arg);
-				//if (expr[0] == IR_ADJ && expr[1] == 0 && (expr[2] == IR_LEAVE || expr[2] == IR_EXIT)) {
-				//	EMIT_JP_IMM(out, 0);
-				//} else {
+				if (expr[0] == IR_ADJ && (expr[2] == IR_LEAVE || expr[2] == IR_EXIT)) {
+					EMIT_LD_SP_IX(out);
+					EMIT_POP_IX(out);
+					resolve_later(out + 1 - outstart, arg);
+					EMIT_JP_IMM(out, 0);
+					expr = &expr[3];
+				} else if (expr[0] == IR_LEAVE || expr[0] == IR_EXIT) {
+					EMIT_LD_SP_IX(out);
+					EMIT_POP_IX(out);
+					resolve_later(out + 1 - outstart, arg);
+					EMIT_JP_IMM(out, 0);
+					expr++;
+				} else {
+					resolve_later(out + 1 - outstart, arg);
 					EMIT_CALL_IMM(out, 0);
-				//}
+				}
 				bt = ((symbol*)arg)->valtype;
+				bcisconst = false;
+				deisconst = false;
+				hlisconst = false;
 				break;
 			case IR_ADJ:
 				expr++;
@@ -2363,10 +2452,12 @@ void assemble(void) {
 						EMIT_POP_BC(out);
 						i += 3;
 					}
+					bcisconst = false;
 				} else {
 					EMIT_LD_HL_IMM(out, (unsigned)arg);
 					EMIT_ADD_HL_SP(out);
 					EMIT_LD_SP_HL(out);
+					hlisconst = false;
 				}
 				break;
 			case IR_ENTER:
@@ -2396,7 +2487,7 @@ void assemble(void) {
 				break;
 			case IR_PUSH_IMM:
 				expr++;
-				EMIT_LD_BC_IMM(out, (unsigned)arg);
+				LOAD_BC(arg);
 				EMIT_PUSH_BC(out);
 				break;
 			case IR_LEA_LOCAL:
@@ -2409,6 +2500,7 @@ void assemble(void) {
 						if (l == IR_LOAD_CHAR) {
 							EMIT_LD_E_IND_IX_DD(out, (unsigned)arg);
 							bt = T_CHAR;
+							deisconst = false;
 						} else if (l == IR_LOAD_WORD) {
 							EMIT_PUSH_HL(out);
 							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
@@ -2416,9 +2508,11 @@ void assemble(void) {
 							EMIT_EX_DE_HL(out);
 							EMIT_POP_HL(out);
 							bt = T_WORD;
+							deisconst = false;
 						} else if (l == IR_LOAD_INT) {
 							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
 							bt = T_INT;
+							deisconst = false;
 						} else if (l == IR_LOAD_LONG) {
 							if ((unsigned)(arg+3+0x80) < 0x100) {
 								EMIT_LD_BC_IND_IX_DD(out, (unsigned)arg);
@@ -2432,11 +2526,13 @@ void assemble(void) {
 								EMIT_POP_IX(out);
 							}
 							bt = T_LONG;
+							bcisconst = false;
 						} else {
 							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
 							bt = T_PTR;
 							expr--;
 							expr--;
+							deisconst = false;
 						}
 					} else {
 						if (l == IR_LOAD_CHAR) {
@@ -2447,9 +2543,12 @@ void assemble(void) {
 							EMIT_SIS_SUFFIX(out);
 							EMIT_EX_DE_HL(out);
 							bt = T_WORD;
+							deisconst = false;
+							hlisconst = false;
 						} else if (l == IR_LOAD_INT) {
 							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
 							bt = T_INT;
+							hlisconst = false;
 						} else if (l == IR_LOAD_LONG) {
 							if ((unsigned)(arg+3+0x80) < 0x100) {
 								EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
@@ -2461,12 +2560,16 @@ void assemble(void) {
 								EMIT_LD_HL_IND_IX_DD(out, 0);
 								EMIT_LD_E_IND_IX_DD(out, 3);
 								EMIT_POP_IX(out);
+								bcisconst = false;
 							}
 							bt = T_LONG;
+							deisconst = false;
+							hlisconst = false;
 						} else {
 							EMIT_LEA_HL_IX_DD(out, (unsigned)arg);
 							bt = T_PTR;
 							expr--;
+							hlisconst = false;
 						}
 					}
 				} else {
@@ -2474,6 +2577,8 @@ void assemble(void) {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_ADD_HL_BC(out);
 					bt = T_PTR;
+					bcisconst = false;
+					hlisconst = false;
 				}
 				break;
 			case IR_LEA_GLOBAL:
@@ -2487,17 +2592,22 @@ void assemble(void) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_EX_DE_HL(out);
 					bt = T_WORD;
+					deisconst = false;
+					hlisconst = false;
 				} else if (l == IR_LOAD_INT) {
 					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
 					bt = T_INT;
+					hlisconst = false;
 				} else if (l == IR_LOAD_LONG) {
 					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
 					EMIT_LD_DE_IND_IMM(out, (unsigned)(arg+3));
 					bt = T_LONG;
+					deisconst = false;
 				} else {
 					expr--;
 					EMIT_LD_HL_IMM(out, (unsigned)arg);
 					bt = T_PTR;
+					hlisconst = false;
 				}
 				break;
 			case IR_STORE_LOCAL:
@@ -2512,6 +2622,7 @@ void assemble(void) {
 					}
 					EMIT_LD_L_A(out);
 					bt = l;
+					hlisconst = false;
 				}
 				if ((unsigned)(arg+0x80) < 0x100) {
 					if (l == T_CHAR) {
@@ -2541,6 +2652,7 @@ void assemble(void) {
 							EMIT_LD_IND_IX_DD_HL(out, 0);
 							EMIT_LD_IND_IX_DD_E(out, 3);
 							EMIT_POP_IX(out);
+							bcisconst = false;
 						}
 					} else {
 						EMIT_LD_IND_IX_DD_HL(out, (unsigned)arg);
@@ -2572,6 +2684,7 @@ void assemble(void) {
 						}
 						EMIT_POP_HL(out);
 					}
+					bcisconst = false;
 				}
 				break;
 			case IR_STORE_GLOBAL:
@@ -2586,6 +2699,7 @@ void assemble(void) {
 					}
 					EMIT_LD_L_A(out);
 					bt = l;
+					hlisconst = false;
 				}
 				if (l == T_CHAR) {
 					if (bt != T_CHAR) {
@@ -2599,6 +2713,7 @@ void assemble(void) {
 					EMIT_INC_HL(out);
 					EMIT_LD_IND_HL_D(out);
 					EMIT_EX_DE_HL(out);
+					deisconst = false;
 				} else if (l == T_LONG) {
 					EMIT_LD_IND_IMM_HL(out, (unsigned)arg);
 					EMIT_LD_A_E(out);
@@ -2617,11 +2732,14 @@ void assemble(void) {
 				EMIT_LD_H_IND_HL(out);
 				EMIT_SIS_SUFFIX(out);
 				EMIT_EX_DE_HL(out);
+				deisconst = false;
+				hlisconst = false;
 				bt = T_WORD;
 				break;
 			case IR_LOAD_INT:
 				EMIT_LD_HL_IND_HL(out);
 				bt = T_INT;
+				hlisconst = false;
 				break;
 			case IR_LOAD_LONG:
 				EMIT_LD_DE_IND_HL(out);
@@ -2631,6 +2749,8 @@ void assemble(void) {
 				EMIT_LD_L_IND_HL(out);
 				EMIT_EX_DE_HL(out);
 				bt = T_LONG;
+				deisconst = false;
+				hlisconst = false;
 				break;
 			case IR_COMPARE_Z:
 				if (bt < T_BOOL_CF || bt > T_BOOL_NZF) {
@@ -2702,6 +2822,7 @@ void assemble(void) {
 					EMIT_JR_NZ_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
 					EMIT_EX_DE_HL(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else {
 					EMIT_ADD_HL_BC(out);
 					EMIT_OR_A(out);
@@ -2709,6 +2830,7 @@ void assemble(void) {
 					EMIT_JR_NZ_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
 					EMIT_EX_DE_HL(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_NZF;
 				break;
@@ -2732,6 +2854,7 @@ void assemble(void) {
 					EMIT_JR_Z_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
 					EMIT_EX_DE_HL(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else {
 					EMIT_ADD_HL_BC(out);
 					EMIT_OR_A(out);
@@ -2739,6 +2862,7 @@ void assemble(void) {
 					EMIT_JR_NZ_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
 					EMIT_EX_DE_HL(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_NZF;
 				break;
@@ -2751,9 +2875,11 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__snot);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lnot);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__inot);
 				}
+				hlisconst = false;
 				break;
 			case IR_OR:
 				bt = convert_flag_to_char(bt);
@@ -2763,9 +2889,11 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__sor);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lor);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__ior);
 				}
+				hlisconst = false;
 				break;
 			case IR_AND:
 				bt = convert_flag_to_char(bt);
@@ -2775,9 +2903,11 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__sand);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__land);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__iand);
 				}
+				hlisconst = false;
 				break;
 			case IR_COMPARE_EQ:
 				bt = convert_flag_to_char(bt);
@@ -2787,13 +2917,16 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false; // DE might not also be const anymore?
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_A(out);
 					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
+					hlisconst = false;
 				} else {
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_ZF;
 				break;
@@ -2805,13 +2938,16 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_A(out);
 					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
+					hlisconst = false;
 				} else {
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_NZF;
 				break;
@@ -2823,13 +2959,16 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_A(out);
 					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
+					hlisconst = false;
 				} else {
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_NCF;
 				break;
@@ -2841,13 +2980,16 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_A(out);
 					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
+					hlisconst = false;
 				} else {
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_NCF;
 				break;
@@ -2859,13 +3001,16 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_A(out);
 					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
+					hlisconst = false;
 				} else {
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_CF;
 				break;
@@ -2877,13 +3022,16 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_A(out);
 					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
+					hlisconst = false;
 				} else {
 					EMIT_SBC_HL_DE(out);
+					hlisconst = false;
 				}
 				bt = T_BOOL_CF;
 				break;
@@ -2899,11 +3047,14 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__bshl);
 				} else if (bt == T_WORD) {
 					EMIT_CALL_IMM(out, TI__sshl);
-				} else if (bt == T_WORD) {
+				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lshl);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__ishl);
 				}
+				bcisconst = false;
+				hlisconst = false;
 				break;
 			case IR_SHR:
 				bt = convert_flag_to_char(bt);
@@ -2917,11 +3068,14 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__bshru);
 				} else if (bt == T_WORD) {
 					EMIT_CALL_IMM(out, TI__sshru);
-				} else if (bt == T_WORD) {
+				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lshru);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__ishru);
 				}
+				bcisconst = false;
+				hlisconst = false;
 				break;
 			case IR_ADD:
 				bt = convert_flag_to_char(bt);
@@ -2934,9 +3088,11 @@ void assemble(void) {
 					EMIT_ADD_HL_BC(out);
 					EMIT_ADC_A_E(out);
 					EMIT_LD_E_A(out);
+					deisconst = false;
 				} else {
 					EMIT_ADD_HL_DE(out);
 				}
+				hlisconst = false;
 				break;
 			case IR_SUB:
 				bt = convert_flag_to_char(bt);
@@ -2955,10 +3111,12 @@ void assemble(void) {
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_E(out);
 					EMIT_LD_E_A(out);
+					deisconst = false;
 				} else {
 					EMIT_OR_A(out);
 					EMIT_SBC_HL_BC(out);
 				}
+				hlisconst = false;
 				break;
 			case IR_DIV:
 				bt = convert_flag_to_char(bt);
@@ -2973,9 +3131,12 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__sdivu);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__ldivu);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__idivu);
 				}
+				bcisconst = false;
+				hlisconst = false;
 				break;
 			case IR_MUL:
 				bt = convert_flag_to_char(bt);
@@ -2991,9 +3152,12 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__smulu);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lmulu);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__imulu);
 				}
+				bcisconst = false;
+				hlisconst = false;
 				break;
 			case IR_MOD:
 				bt = convert_flag_to_char(bt);
@@ -3008,9 +3172,12 @@ void assemble(void) {
 					EMIT_CALL_IMM(out, TI__sremu);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lremu);
+					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__iremu);
 				}
+				bcisconst = false;
+				hlisconst = false;
 				break;
 			case IR_NEG:
 				bt = convert_flag_to_char(bt);
@@ -3029,10 +3196,13 @@ void assemble(void) {
 						EMIT_SBC_HL_BC(out);
 						EMIT_SBC_A_C(out);
 						EMIT_LD_E_A(out);
+						bcisconst = false;
 					} else {
-						EMIT_SBC_HL_BC(out);
+						EMIT_SBC_HL_DE(out);
 					}
 				}
+				deisconst = false;
+				hlisconst = false;
 				break;
 			case IR_INC:
 				bt = convert_flag_to_char(bt);
@@ -3046,9 +3216,11 @@ void assemble(void) {
 					EMIT_ADD_HL_BC(out);
 					EMIT_ADC_A_E(out);
 					EMIT_LD_E_A(out);
+					deisconst = false;
 				} else {
 					EMIT_INC_HL(out);
 				}
+				hlisconst = false;
 				break;
 			case IR_DEC:
 				bt = convert_flag_to_char(bt);
@@ -3063,21 +3235,27 @@ void assemble(void) {
 					EMIT_SBC_HL_BC(out);
 					EMIT_ADC_A_E(out);
 					EMIT_LD_E_A(out);
+					deisconst = false;
 				} else {
 					EMIT_DEC_HL(out);
 				}
+				hlisconst = false;
 				break;
 			case IR_INC_SEC:
 				EMIT_INC_DE(out);
+				deisconst = false;
 				break;
 			case IR_INC_TER:
 				EMIT_INC_BC(out);
+				bcisconst = false;
 				break;
 			case IR_DEC_SEC:
 				EMIT_DEC_DE(out);
+				deisconst = false;
 				break;
 			case IR_DEC_TER:
 				EMIT_DEC_BC(out);
+				bcisconst = false;
 				break;
 			case IR_OR_CONST:
 				expr++;
@@ -3095,10 +3273,16 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__lor);
+					deisconst = false;
 				} else {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__ior);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				break;
 			case IR_AND_CONST:
 				expr++;
@@ -3116,10 +3300,16 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__land);
+					deisconst = false;
 				} else {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__iand);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				break;
 			case IR_COMPARE_EQ_CONST:
 				expr++;
@@ -3135,11 +3325,17 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_A_E(out);
 				} else {
 					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				bt = T_BOOL_ZF;
 				break;
 			case IR_COMPARE_NEQ_CONST:
@@ -3156,11 +3352,17 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_A_E(out);
 				} else {
 					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				bt = T_BOOL_NZF;
 				break;
 			case IR_COMPARE_LT_CONST:
@@ -3177,11 +3379,17 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_A_E(out);
 				} else {
 					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				bt = T_BOOL_CF;
 				break;
 			case IR_COMPARE_LTEQ_CONST:
@@ -3198,11 +3406,17 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, arg+1);
 					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_A_E(out);
 				} else {
 					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, arg+1);
 					EMIT_SBC_HL_BC(out);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				bt = T_BOOL_CF;
 				break;
 			case IR_COMPARE_GT_CONST:
@@ -3219,11 +3433,17 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, arg+1);
 					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_A_E(out);
 				} else {
 					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, arg+1);
 					EMIT_SBC_HL_BC(out);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				bt = T_BOOL_NCF;
 				break;
 			case IR_COMPARE_GTEQ_CONST:
@@ -3240,11 +3460,17 @@ void assemble(void) {
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_A_E(out);
 				} else {
 					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
 				}
+				if (bt != T_CHAR) {
+					bcisconst = true;
+					bcvalue = arg;
+				}
+				hlisconst = false;
 				bt = T_BOOL_NCF;
 				break;
 			case IR_SHL_CONST:
@@ -3257,6 +3483,7 @@ void assemble(void) {
 						EMIT_LD_B_IMM(out, (unsigned)arg);
 						EMIT_ADD_A_A(out);
 						EMIT_DJNZ_IMM(out, -(L_DJNZ_IMM+L_ADD_A_A));
+						bcisconst = false;
 					} else {
 						while (arg-- > 0) {
 							EMIT_ADD_A_A(out);
@@ -3287,17 +3514,22 @@ void assemble(void) {
 						EMIT_LD_B_IMM(out, (unsigned)arg);
 						EMIT_ADD_HL_HL(out);
 						EMIT_DJNZ_IMM(out, -(L_DJNZ_IMM+L_ADD_HL_HL));
+						bcisconst = false;
 					} else {
 						while (arg-- > 0) {
 							EMIT_ADD_HL_HL(out);
 						}
 					}
+					/*
 					if (bt == T_WORD) {
 						EMIT_SIS_SUFFIX(out);
 						EMIT_EX_DE_HL(out);
 						EMIT_EX_DE_HL(out);
+						deisconst = false;
 					}
+					*/
 				}
+				hlisconst = false;
 				break;
 			case IR_SHR_CONST:
 				expr++;
@@ -3310,6 +3542,7 @@ void assemble(void) {
 						EMIT_OR_A(out);
 						EMIT_RRA(out);
 						EMIT_DJNZ_IMM(out, -(L_DJNZ_IMM+L_RRA+L_OR_A));
+						bcisconst = false;
 					} else {
 						while (arg-- > 0) {
 							EMIT_OR_A(out);
@@ -3319,13 +3552,17 @@ void assemble(void) {
 				} else if (bt == T_WORD) {
 					EMIT_LD_C_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__sshru);
+					bcisconst = false;
 				} else if (bt == T_LONG) {
 					EMIT_LD_C_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__lshru);
+					bcisconst = false;
 				} else {
 					EMIT_LD_C_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__ishru);
+					bcisconst = false;
 				}
+				hlisconst = false;
 				break;
 			case IR_ADD_CONST:
 				expr++;
@@ -3345,6 +3582,9 @@ void assemble(void) {
 						EMIT_ADD_HL_BC(out);
 						EMIT_ADC_A_E(out);
 						EMIT_LD_E_A(out);
+						deisconst = false;
+						bcisconst = true;
+						bcvalue = arg;
 					} else {
 						if (bt == T_WORD) {
 							EMIT_SIS_SUFFIX(out);
@@ -3361,14 +3601,18 @@ void assemble(void) {
 							}
 							EMIT_ADD_HL_BC(out);
 						}
+						bcisconst = true;
+						bcvalue = arg;
 					}
 				}
+				hlisconst = false;
 				break;
 			case IR_SUB_CONST:
 				expr++;
 				bt = convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_SUB_A_IMM(out, (unsigned)arg);
+					break;
 				} else if (bt == T_LONG) {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_LD_A_E(out);
@@ -3382,190 +3626,242 @@ void assemble(void) {
 					}
 					EMIT_SBC_HL_BC(out);
 				}
+				bcisconst = true;
+				bcvalue = arg;
+				hlisconst = false;
 				break;
 			case IR_MUL_CONST:
 				expr++;
-				if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-					if (bt == T_BOOL_CF) {
-						EMIT_JR_C_IMM(out, L_LD_HL_IMM);
-						EMIT_OR_A(out);
-					} else if (bt == T_BOOL_ZF) {
-						EMIT_JR_Z_IMM(out, L_LD_HL_IMM);
-						EMIT_OR_A(out);
-					} else if (bt == T_BOOL_NCF) {
-						EMIT_JR_NC_IMM(out, L_LD_HL_IMM);
-					} else {
-						EMIT_JR_NZ_IMM(out, L_LD_HL_IMM);
-						EMIT_OR_A(out);
-					}
-					EMIT_SBC_HL_HL(out);
-					EMIT_JR_IMM(out, L_LD_HL_IMM);
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-				} else if (bt == T_CHAR) {
-					EMIT_LD_H_IMM(out, (unsigned)arg);
-					EMIT_LD_L_A(out);
-					EMIT_MLT_HL(out);
-					bt = T_INT;
-				} else if (bt == T_LONG) {
-					if (arg == 0) {
-						EMIT_OR_A(out);
+				if (arg == 1) {
+					if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
+						if (bt == T_BOOL_CF) {
+							EMIT_JR_C_IMM(out, L_LD_HL_IMM);
+							EMIT_OR_A(out);
+						} else if (bt == T_BOOL_ZF) {
+							EMIT_JR_Z_IMM(out, L_LD_HL_IMM);
+							EMIT_OR_A(out);
+						} else if (bt == T_BOOL_NCF) {
+							EMIT_JR_NC_IMM(out, L_LD_HL_IMM);
+						} else {
+							EMIT_JR_NZ_IMM(out, L_LD_HL_IMM);
+							EMIT_OR_A(out);
+						}
 						EMIT_SBC_HL_HL(out);
-						EMIT_LD_E_L(out);
-					} else if (arg == 2) {
-						EMIT_LD_A_E(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADC_A_A(out);
-					} else if (arg > 2) {
-						EMIT_XOR_A(out);
-						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_CALL_IMM(out, TI__lmulu);
+						EMIT_JR_IMM(out, L_LD_HL_IMM);
+						EMIT_LD_HL_IMM(out, (unsigned)arg);
+						hlisconst = false;
+						bt = T_INT;
 					}
 				} else {
-					if (arg == 0) {
-						EMIT_OR_A(out);
-						EMIT_SBC_HL_HL(out);
-					} else if (arg == 2) {
-						EMIT_ADD_HL_HL(out);
-					} else if (arg == 3) {
-						EMIT_PUSH_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_POP_DE(out);
-						EMIT_ADD_HL_DE(out);
-					} else if (arg == 4) {
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-					} else if (arg == 5) {
-						EMIT_PUSH_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_POP_DE(out);
-						EMIT_ADD_HL_DE(out);
-					} else if (arg == 6) {
-						EMIT_PUSH_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_POP_DE(out);
-						EMIT_ADD_HL_DE(out);
-						EMIT_ADD_HL_DE(out);
-					} else if (arg == 7) {
-						EMIT_PUSH_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_POP_DE(out);
-						EMIT_ADD_HL_DE(out);
-						EMIT_ADD_HL_DE(out);
-						EMIT_ADD_HL_DE(out);
-					} else if (arg == 8) {
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-					} else if (arg == 9) {
-						EMIT_PUSH_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_POP_DE(out);
-						EMIT_ADD_HL_DE(out);
-					} else if (arg == 10) {
-						EMIT_ADD_HL_HL(out);
-						EMIT_PUSH_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_POP_DE(out);
-						EMIT_ADD_HL_DE(out);
-					} else if (arg == 16) {
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADD_HL_HL(out);
-					} else if (arg > 2) {
-						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_CALL_IMM(out, TI__imulu);
+					if (bt == T_CHAR) {
+						EMIT_LD_H_IMM(out, (unsigned)arg);
+						EMIT_LD_L_A(out);
+						EMIT_MLT_HL(out);
+						bt = T_WORD;
+					} else if (bt == T_LONG) {
+						if (arg == 0) {
+							EMIT_OR_A(out);
+							EMIT_SBC_HL_HL(out);
+							EMIT_LD_E_L(out);
+						} else if (arg == 2) {
+							EMIT_LD_A_E(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADC_A_A(out);
+						} else if (arg > 2) {
+							EMIT_XOR_A(out);
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_CALL_IMM(out, TI__lmulu);
+							bcisconst = true;
+							bcvalue = arg;
+						}
+						deisconst = false;
+					} else {
+						if (arg == 0) {
+							EMIT_OR_A(out);
+							EMIT_SBC_HL_HL(out);
+						} else if (arg == 2) {
+							EMIT_ADD_HL_HL(out);
+						} else if (arg == 3) {
+							EMIT_PUSH_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_POP_DE(out);
+							EMIT_ADD_HL_DE(out);
+							deisconst = false;
+						} else if (arg == 4) {
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+						} else if (arg == 5) {
+							EMIT_PUSH_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_POP_DE(out);
+							EMIT_ADD_HL_DE(out);
+							deisconst = false;
+						} else if (arg == 6) {
+							EMIT_PUSH_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_POP_DE(out);
+							EMIT_ADD_HL_DE(out);
+							EMIT_ADD_HL_DE(out);
+							deisconst = false;
+						} else if (arg == 7) {
+							EMIT_PUSH_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_POP_DE(out);
+							EMIT_ADD_HL_DE(out);
+							EMIT_ADD_HL_DE(out);
+							EMIT_ADD_HL_DE(out);
+							deisconst = false;
+						} else if (arg == 8) {
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+						} else if (arg == 9) {
+							EMIT_PUSH_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_POP_DE(out);
+							EMIT_ADD_HL_DE(out);
+							deisconst = false;
+						} else if (arg == 10) {
+							EMIT_ADD_HL_HL(out);
+							EMIT_PUSH_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_POP_DE(out);
+							EMIT_ADD_HL_DE(out);
+							deisconst = false;
+						} else if (arg == 16) {
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+							EMIT_ADD_HL_HL(out);
+						} else if (arg > 2) {
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_CALL_IMM(out, TI__imulu);
+							bcisconst = true;
+							bcvalue = arg;
+						}
 					}
+					hlisconst = false;
 				}
 				break;
 			case IR_DIV_CONST:
 				expr++;
-				if (arg == 0) {
-					EMIT_SCF(out);
-					EMIT_SBC_HL_HL(out);
-					bt = T_INT;
-				} else if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-					if (arg > 1) {
-						EMIT_XOR_A(out);
-						bt = T_CHAR;
-					}
-				} else if (bt == T_CHAR) {
-					if (arg == 2) {
-						EMIT_RRA(out);
-					} else if (arg == 4) {
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-					} else if (arg == 8) {
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-					} else if (arg == 16) {
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-					} else if (arg == 32) {
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-					} else if (arg == 64) {
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-					} else if (arg == 128) {
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-						EMIT_RRA(out);
-					} else if (arg >= 256) {
-						EMIT_XOR_A(out);
-					} else {
-						EMIT_LD_L_A(out);
-						EMIT_LD_H_IMM(out, 0);
+				if (arg != 1) {
+					if (arg == 0) {
+						EMIT_SCF(out);
+						EMIT_SBC_HL_HL(out);
+						bt = T_INT;
+						hlisconst = true;
+						hlvalue = -1;
+						break;
+					} else if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
+						if (arg > 1) {
+							EMIT_XOR_A(out);
+							bt = T_CHAR;
+						}
+					} else if (bt == T_CHAR) {
+						if (arg == 2) {
+							EMIT_RRA(out);
+						} else if (arg == 4) {
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+						} else if (arg == 8) {
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+						} else if (arg == 16) {
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+						} else if (arg == 32) {
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+						} else if (arg == 64) {
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+						} else if (arg == 128) {
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+							EMIT_RRA(out);
+						} else if (arg >= 256) {
+							EMIT_XOR_A(out);
+						} else {
+							EMIT_LD_L_A(out);
+							EMIT_LD_H_IMM(out, 0);
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_CALL_IMM(out, TI__sdivu);
+						}
+					} else if (bt == T_WORD) {
 						EMIT_LD_BC_IMM(out, (unsigned)arg);
 						EMIT_CALL_IMM(out, TI__sdivu);
+					} else if (bt == T_LONG) {
+						EMIT_XOR_A(out);
+						EMIT_LD_BC_IMM(out, (unsigned)arg);
+						EMIT_CALL_IMM(out, TI__ldivu);
+					} else {
+						EMIT_LD_BC_IMM(out, (unsigned)arg);
+						EMIT_CALL_IMM(out, TI__idivu);
 					}
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__sdivu);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__ldivu);
-				} else {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__idivu);
 				}
+				bcisconst = true;
+				bcvalue = arg;
+				hlisconst = false;
 				break;
 			case IR_MOD_CONST:
 				expr++;
-				
 				if (arg == 0) {
 					EMIT_SCF(out);
 					EMIT_SBC_HL_HL(out);
 					bt = T_INT;
+					hlisconst = true;
+					hlvalue = -1;
+					break;
 				} else if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
 					bt = convert_flag_to_char(bt);
-				} else if (bt == T_CHAR) {
-
+				} else if (bt == T_CHAR || bt == T_WORD) {
+					if (bt == T_CHAR) {
+						EMIT_LD_L_A(out);
+						if (!(hlisconst && hlvalue < 256)) {
+							EMIT_LD_H_IMM(out, 0);
+						}
+						EMIT_LD_B_H(out);
+					}
+					EMIT_CALL_IMM(out, TI__sremu);
+					break;
+				} else if (bt == T_LONG) {
+					EMIT_LD_BC_IMM(out, arg);
+					EMIT_XOR_A(out);
+					EMIT_CALL_IMM(out, TI__lremu);
+				} else {
+					EMIT_LD_BC_IMM(out, arg);
+					EMIT_CALL_IMM(out, TI__iremu);
 				}
+				bcisconst = true;
+				bcvalue = arg;
+				hlisconst = false;
 				break;
 			case IR_JMP:
 				expr++;
 				resolve_later(out + 1 - outstart, arg);
 				EMIT_JP_IMM(out, 0);
+				bcisconst = false;
+				deisconst = false;
+				hlisconst = false;
 				break;
 			case IR_BZ:
 				expr++;
@@ -3583,45 +3879,110 @@ void assemble(void) {
 				EMIT_PUSH_HL(out);
 				EMIT_CALL_IMM(out, TI__strlen);
 				EMIT_POP_BC(out);
+				bcisconst = hlisconst;
+				bcvalue = hlvalue;
+				hlisconst = false;
 				break;
 			case IR_STORE:
 				expr++;
-				if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-					bt = convert_flag_to_char(bt);
-				} else if (arg == T_CHAR) {
-					EMIT_LD_IND_HL_A(out);
-					break;
-				}
-				if (arg == T_CHAR) {
-					EMIT_LD_IND_HL_C(out);
-				} else if (arg == T_WORD) {
-					EMIT_LD_IND_HL_C(out);
-					EMIT_INC_HL(out);
-					EMIT_LD_IND_HL_B(out);
-					EMIT_LD_H_B(out);
-					EMIT_LD_L_C(out);
-					bt = T_WORD;
-				} else if (arg == T_LONG) {
-					if (bt == T_LONG) {
-						EMIT_LD_IND_HL_BC(out);
-						EMIT_LD_DE_IND_HL(out);
-					} else {
+				bt = convert_flag_to_char(bt);
+				if (arg == T_LONG) {
+					if (bt == T_CHAR) {
+						EMIT_OR_A(out);
+						EMIT_SBC_HL_HL(out);
+						EMIT_EX_DE_HL(out);
+						EMIT_LD_IND_HL_A(out);
+						EMIT_INC_HL(out);
 						EMIT_LD_IND_HL_DE(out);
-					}
-					EMIT_INC_HL(out);
-					EMIT_INC_HL(out);
-					EMIT_INC_HL(out);
-					if (bt != T_LONG) {
-						EMIT_XOR_A(out);
-					}
-					EMIT_LD_IND_HL_A(out);
-					EMIT_EX_DE_HL(out);
-					if (bt == T_LONG) {
+						deisconst = true;
+						devalue = 0;
+						hlisconst = false;
+					} else if (bt == T_LONG) {
+						EMIT_LD_A_E(out);
+						EMIT_LD_IND_BC_A(out);
+						EMIT_PUSH_BC(out);
+						EMIT_EX_DE_HL(out);
+						EMIT_POP_HL(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_DE(out);
+						EMIT_EX_DE_HL(out);
 						EMIT_LD_E_A(out);
+						bcisconst = false;
+						deisconst = false;
+						hlisconst = false;
+					} else if (bt == T_WORD) {
+						EMIT_EX_DE_HL(out);
+						EMIT_LD_IND_HL_E(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_D(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_IMM(out, 0);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_IMM(out, 0);
+						EMIT_SIS_SUFFIX(out);
+						EMIT_EX_DE_HL(out);
+						deisconst = false;
+						hlisconst = false;
+					} else {
+						EMIT_EX_DE_HL(out);
+						EMIT_LD_IND_HL_DE(out);
+						EMIT_INC_HL(out);
+						EMIT_INC_HL(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_IMM(out, 0);
+						EMIT_EX_DE_HL(out);
+						deisconst = false;
 					}
-				} else {
-					EMIT_LD_IND_HL_DE(out);
+				} else if (arg == T_CHAR) {
+					if (bt != T_CHAR) {
+						EMIT_LD_A_L(out);
+					}
+					EMIT_LD_IND_DE_A(out);
+				} else if (arg == T_WORD) {
 					EMIT_EX_DE_HL(out);
+					if (bt == T_CHAR) {
+						EMIT_LD_IND_HL_A(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_IMM(out, 0);
+						EMIT_LD_H_IND_HL(out);
+						EMIT_LD_L_A(out);
+					} else {
+						EMIT_LD_IND_HL_E(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_D(out);
+						EMIT_LD_H_D(out);
+						EMIT_LD_L_E(out);
+					}
+					deisconst = false;
+					hlisconst = false;
+					bt = T_WORD;
+				} else { // arg == T_INT or equivalent size type
+					if (bt == T_CHAR) {
+						EMIT_OR_A(out);
+						EMIT_SBC_HL_HL(out);
+						EMIT_LD_L_A(out);
+						EMIT_EX_DE_HL(out);
+						EMIT_LD_IND_HL_DE(out);
+						hlisconst = false;
+						deisconst = false;
+					} else if (bt == T_WORD) {
+						EMIT_EX_DE_HL(out);
+						EMIT_LD_IND_HL_E(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_D(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_IND_HL_IMM(out, 0);
+						hlisconst = false;
+						deisconst = false;
+					} else {
+						bool tmpbool = hlisconst;
+						EMIT_EX_DE_HL(out);
+						EMIT_LD_IND_HL_DE(out);
+						hlisconst = deisconst;
+						hlvalue = devalue;
+						deisconst = tmpbool;
+						devalue = hlvalue;
+					}
 				}
 				break;
 			case IR_STRCPY:
@@ -3630,14 +3991,18 @@ void assemble(void) {
 				EMIT_CALL_IMM(out, TI__strcpy);
 				EMIT_POP_HL(out);
 				EMIT_POP_BC(out);
+				deisconst = false;
 				break;
 			case IR_DEFINE_FUNCTION:
 				expr++;
 				expr++;
+				bcisconst = false;
+				deisconst = false;
+				hlisconst = false;
 				break;
 			default:
 #ifdef PLATFORM_DESKTOP
-				printf("Invalid IR code: %X\n", op);
+				printf("Invalid IR code: 0x%X\nLast known valid IR code: 0x%X\n", op, oldopcode);
 #endif
 				error("Internal: Invalid IR code");
 				break;
@@ -3710,6 +4075,8 @@ int main(int argc, char **argv) {
 #endif
 			if (opcode == IR_DEFINE_FUNCTION) {
 				buffer[bufferlen++] = '\n';
+			} else {
+				bufferlen += sprintf(&buffer[bufferlen], "$%-6X: ", i);
 			}
 			memcpy(&buffer[bufferlen], IR_STRINGS[opcode], strlen(IR_STRINGS[opcode]));
 			bufferlen += strlen(IR_STRINGS[opcode]);
@@ -3732,12 +4099,10 @@ int main(int argc, char **argv) {
 					int arglen;
 					i++;
 					nargs--;
-					if (exprstart[i] > 65536 && -exprstart[i] < 65536) {
-						arglen = sprintf(&buffer[bufferlen], "$%llX", exprstart[i]);
-					} else if (exprstart[i] >= -65536llu) {
-						arglen = sprintf(&buffer[bufferlen], "-%llu", -exprstart[i]);
+					if ((uint32_t)(-exprstart[i]) < 65536 && (uint32_t)(exprstart[i]) > 0) {
+						arglen = sprintf(&buffer[bufferlen], "-$%X", (uint32_t)-exprstart[i]);
 					} else {
-						arglen = sprintf(&buffer[bufferlen], "%llu", exprstart[i]);
+						arglen = sprintf(&buffer[bufferlen], "$%X", (uint32_t)exprstart[i]);
 					}
 					if (arglen <= 0) {
 						printf("Internal: sprintf failed with argument %llu (%llX)\n", exprstart[i], exprstart[i]);
