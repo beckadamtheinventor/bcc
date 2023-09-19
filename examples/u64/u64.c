@@ -9,9 +9,9 @@ uint8_t *u64_add(uint8_t *a, uint8_t *b) {
     return a;
 }
 
-uint8_t *u64_from_int(uint8_t *a, int b) {
+uint8_t *u64_from_int(uint8_t *a, long b) {
     uint8_t c, d;
-    int *aa;
+    long *aa;
     *(aa = a) = b;
     c = 4;
     if (b >= 0x800000) {

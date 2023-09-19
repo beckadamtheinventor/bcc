@@ -22,8 +22,7 @@ APPEND     = @echo.$(subst ",^",$(subst \,^\,$(subst &,^&,$(subst |,^|,$(subst >
 
 CC := C:\raylib\w64devkit\bin\gcc.exe
 
-RAYLIB_PATH := C:\raylib\raylib
-CCFLAGS := -O3 -std=c99 -I$(RAYLIB_PATH)\src -Iexternal -DPLATFORM_DESKTOP -DPLATFORM_WINDOWS  -Wextra
+CCFLAGS := -O3 -std=c99 -Iexternal -DPLATFORM_DESKTOP -DPLATFORM_WINDOWS -Wextra
 
 # Add these flags if your compiler supports it
 #CFLAGS += -Wstack-protector -fstack-protector-strong --param=ssp-buffer-size=1 -fsanitize=address,bounds -fsanitize-undefined-trap-on-error
@@ -49,7 +48,8 @@ APPEND     = @echo $(call QUOTE_ARG,$1) >>$@
 
 CC := gcc
 
-CCFLAGS := -O3 -std=c99 -Iexternal -DPLATFORM_DESKTOP -DPLATFORM_LINUX -Wextra -D_DEFAULT_SOURCE
+CCFLAGS := -O3 -std=c99 -Iexternal -DPLATFORM_DESKTOP -DPLATFORM_LINUX -Wextra
+CCFLAGS := -O3 -std=c99 -Iexternal -DPLATFORM_DESKTOP -DPLATFORM_LINUX -Wextra
 
 # Add these flags if your compiler supports it
 #CFLAGS += -Wstack-protector -fstack-protector-strong --param=ssp-buffer-size=1 -fsanitize=address,bounds -fsanitize-undefined-trap-on-error
@@ -67,7 +67,6 @@ CCFLAGS += -Wno-unused-parameter -Werror=write-strings -Werror=redundant-decls -
 
 srcfiles    :=  $(call NATIVEPATH,src/main.c)
 objects     :=  $(patsubst %.c, %.o, $(srcfiles))
-headers     :=  $(call NATIVEPATH,src/ez80.h)
 
 all: $(appname)
 

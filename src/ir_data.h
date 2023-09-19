@@ -8,6 +8,7 @@ const int8_t IR_ARGS[IR_INVALID_OPCODE] = {
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 2,
+	0, 0, 1, 2,
 };
 
 const char *IR_STRINGS[IR_INVALID_OPCODE] = {
@@ -93,6 +94,10 @@ const char *IR_STRINGS[IR_INVALID_OPCODE] = {
 	"STORE",
 	"SET_ONE_IF_NOT_ZERO",
 	"DEFINE_FUNCTION",
+	"PUSH_ARG",
+	"PUSH_ARG_32",
+	"PUSH_ARG_IMM",
+	"PUSH_ARG_IMM_32",
 };
 
 

@@ -12,9 +12,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "ez80.h"
-#include "ti84pceg.h"
-
 // #define DEBUG
 
 #ifdef PLATFORM_DESKTOP
@@ -215,6 +212,11 @@ enum {
 	IR_SET_ONE_IF_NOT_ZERO, // set primary to 1 if primary is not zero
 	IR_DEFINE_FUNCTION, // Define function here. arg0 is symbol, arg1 is number of arguments
 
+	IR_PUSH_ARG,
+	IR_PUSH_ARG_32,
+	IR_PUSH_ARG_IMM,
+	IR_PUSH_ARG_IMM_32,
+
 	IR_INVALID_OPCODE,
 };
 
@@ -230,18 +232,24 @@ enum {
 enum {
 	FMT_CE = 1,
 	FMT_BOS,
+#ifdef PLATFORM_DESKTOP
+	FMT_BXS2307,
+#endif
 };
 
 #ifdef PLATFORM_DESKTOP
 #include "ir_data.h"
 #endif
 
+#define FUNCTION_MAX_NUM_ARGS 16
 #define sizeof_symbol(name) (strlen(name)+sizeof(symbol))
 typedef struct _symbol {
 	uint8_t symtype, valtype;
 	unsigned int datalen;
 	uint32_t value;
 	uint32_t resolved_value;
+	uint8_t *functionargs;
+	struct _symbol *members;
 	struct _symbol *prev, *next;
 	uint16_t hash;
 	char name[1];
@@ -249,6 +257,12 @@ typedef struct _symbol {
 
 bool tkisconst = true;
 uint8_t tk, tkvaltype;
+#ifdef PLATFORM_DESKTOP
+bool reverse_argument_stack = false;
+#else
+bool reverse_argument_stack = true;
+#endif
+
 #ifdef BOS_BUILD
 uint8_t outformat = FMT_BOS;
 #else
@@ -260,7 +274,7 @@ unsigned int tknamelen;
 char *srcdata;
 #ifdef PLATFORM_DESKTOP
 #define IR_OUTPUT_SIZE 1024000
-#define OUTPUT_BUFFER_SIZE 4096000
+#define OUTPUT_BUFFER_SIZE 16384000
 #define DATA_RESOLVE_STACK_SIZE 4096
 #define RESOLVE_STACK_SIZE 65536
 #define SYM_STACK_SAVE_SIZE 256
@@ -289,7 +303,7 @@ uint32_t tkval;
 _ptr *resolvestack, *resolvestackstart, *expr, *exprstart, *data_start, *data_resolve_stack;
 _int data_resolve_sp = 0;
 uint8_t *out, *outstart;
-unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr = TI_pixelShadow, PROGRAM_ORIGIN = TI_userMem;
+unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr, PROGRAM_ORIGIN;
 symbol *symtable = NULL;
 symbol **localsymstack = NULL;
 
@@ -858,6 +872,7 @@ void expression(uint8_t level) {
 	uint8_t primarytype;
 	int32_t primary;
 	_ptr *d, *tmpexpr = expr;
+	unsigned int argno;
 	int tmp;
 	symbol *sym;
 
@@ -955,56 +970,96 @@ void expression(uint8_t level) {
 		if (tk == '(') {
 			// function call
 			tmp = 0;
+			argno = 0;
 			if ((sym->symtype & SYM_MASK) != SYM_FUNCTION) {
 				error("can't call non-function value as function");
 			}
 			tk_next();
-			// keep track of argument IR generation start
-			function_argument_stack_sp = 0;
-			function_argument_stack[0].expr = expr;
-			while (tk != ')') {
-				// adding each expression IR start and end to a FILO stack
-				function_argument_stack_sp++;
-				function_argument_stack[function_argument_stack_sp].expr = expr;
-				expression(TK_ASSIGN);
-				if (tkisconst) {
-					if (tkvaltype == T_LONG) {
-						*++expr = IR_PUSH_IMM_32;
-						*++expr = tkval;
-						*++expr = tkval >> 24;
+			if (reverse_argument_stack) {
+				// keep track of argument IR generation start
+				function_argument_stack_sp = 0;
+				function_argument_stack[0].expr = expr;
+				while (tk != ')') {
+					// adding each expression IR start and end to a FILO stack
+					function_argument_stack_sp++;
+					function_argument_stack[function_argument_stack_sp].expr = expr;
+					expression(TK_ASSIGN);
+					if (argno > sym->functionargs[0]) {
+						error("Too many arguments for function");
+					}
+					if (tkisconst) {
+						if (sym->functionargs[sym->functionargs[0]+1-argno] == T_LONG) {
+							*++expr = IR_PUSH_ARG_IMM_32;
+							*++expr = tkval;
+							*++expr = tkval >> 24;
+							tmp += 6;
+						} else {
+							*++expr = IR_PUSH_ARG_IMM;
+							*++expr = tkval;
+							tmp += 3;
+						}
+					} else if (sym->functionargs[sym->functionargs[0]+1-argno] == T_LONG) {
+						*++expr = IR_PUSH_ARG_32;
 						tmp += 6;
 					} else {
-						*++expr = IR_PUSH_IMM;
-						*++expr = tkval;
+						*++expr = IR_PUSH_ARG;
 						tmp += 3;
 					}
-				} else if (tkvaltype == T_LONG) {
-					*++expr = IR_PUSH_32;
-					tmp += 6;
-				} else {
-					*++expr = IR_PUSH;
-					tmp += 3;
+					function_argument_stack[function_argument_stack_sp].expr_end = expr;
+					if (tk == ',') { // maybe unnecessary check?
+						tk_next();
+					}
+					argno++;
 				}
-				function_argument_stack[function_argument_stack_sp].expr_end = expr;
-				if (tk == ',') { // maybe unnecessary check?
-					tk_next();
+				function_argument_stack[0].expr_end = expr;
+				// copy argument expression IR backwards
+				while (function_argument_stack_sp > 0) {
+					_ptr *e = function_argument_stack[function_argument_stack_sp].expr;
+					while (e < function_argument_stack[function_argument_stack_sp].expr_end) {
+						*++expr = *++e;
+					}
+					function_argument_stack_sp--;
+				}
+				// overwrite the forwards expression IR with the backwards argument expression IR
+				for (unsigned int i = 1; i <= function_argument_stack[0].expr_end - function_argument_stack[0].expr; i++) {
+					function_argument_stack[0].expr[i] = function_argument_stack[0].expr_end[i];
+				}
+				// rewind the IR output
+				expr = function_argument_stack[0].expr_end;
+			} else {
+				while (tk != ')') {
+					expression(TK_ASSIGN);
+					if (argno > sym->functionargs[0]) {
+						error("Too many arguments for function");
+					}
+					if (tkisconst) {
+						if (sym->functionargs[argno+1] == T_LONG) {
+							*++expr = IR_PUSH_ARG_IMM_32;
+							*++expr = tkval;
+							*++expr = tkval >> 24;
+							tmp += 6;
+						} else {
+							*++expr = IR_PUSH_ARG_IMM;
+							*++expr = tkval;
+							tmp += 3;
+						}
+					} else if (sym->functionargs[argno+1] == T_LONG) {
+						*++expr = IR_PUSH_ARG_32;
+						tmp += 6;
+					} else {
+						*++expr = IR_PUSH_ARG;
+						tmp += 3;
+					}
+					function_argument_stack[function_argument_stack_sp].expr_end = expr;
+					if (tk == ',') { // maybe unnecessary check?
+						tk_next();
+					}
+					argno++;
 				}
 			}
-			function_argument_stack[0].expr_end = expr;
-			// copy argument expression IR backwards
-			while (function_argument_stack_sp > 0) {
-				_ptr *e = function_argument_stack[function_argument_stack_sp].expr;
-				while (e < function_argument_stack[function_argument_stack_sp].expr_end) {
-					*++expr = *++e;
-				}
-				function_argument_stack_sp--;
+			if (argno < sym->functionargs[0]) {
+				error("Too many arguments for function");
 			}
-			// overwrite the forwards expression IR with the backwards argument expression IR
-			for (unsigned int i = 1; i <= function_argument_stack[0].expr_end - function_argument_stack[0].expr; i++) {
-				function_argument_stack[0].expr[i] = function_argument_stack[0].expr_end[i];
-			}
-			// rewind the IR output
-			expr = function_argument_stack[0].expr_end;
 			tk_next();
 			*++expr = IR_CALL;
 			*++expr = sym;
@@ -1195,12 +1250,12 @@ void expression(uint8_t level) {
 			}
 			*++expr = (tmp == TK_INC) ? IR_INC : IR_DEC;
 			*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
-			if ((sym->value & T_MASK) == T_STR) {
-				*++expr = (sym->value & ~T_MASK) | T_CHAR;
+			*++expr = signext(sym->value);
+			if ((tkvaltype & T_MASK) == T_STR) {
+				*++expr = (tkvaltype & ~T_MASK) | T_CHAR;
 			} else {
-				*++expr = sym->value;
+				*++expr = tkvaltype;
 			}
-			*++expr = tkvaltype & T_MASK;
 		} else {
 			error("Invalid value increment/decrement");
 		}
@@ -1290,7 +1345,7 @@ void expression(uint8_t level) {
 					}
 				}
 				*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
-				*++expr = sym->value;
+				*++expr = signext(sym->value);
 				*++expr = tmp;
 			}
 		} else if (tk == TK_COND) {
@@ -1455,7 +1510,7 @@ void expression(uint8_t level) {
 				}
 				*++expr = (tk == TK_INC) ? IR_INC : IR_DEC;
 				*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
-				*++expr = sym->value;
+				*++expr = signext(sym->value);
 				*++expr = tkvaltype & T_MASK;
 			} else {
 				error("Invalid value for post increment/decrement");
@@ -1531,7 +1586,7 @@ int statement(int stackdepth) {
 						*++expr = tkval;
 					}
 					*++expr = IR_STORE_LOCAL;
-					*++expr = sym->value;
+					*++expr = signext(sym->value);
 					*++expr = sym->valtype & T_MASK;
 					tk_next();
 				} else if (tk == TK_STR) {
@@ -1544,7 +1599,7 @@ int statement(int stackdepth) {
 						*++expr = IR_STRCPY;
 					} else if ((sym->valtype & T_MASK) == T_STR) {
 						*++expr = IR_STORE_LOCAL;
-						*++expr = sym->value;
+						*++expr = signext(sym->value);
 						*++expr = sym->valtype & T_MASK;
 					} else {
 						error("Invalid local type for string initializer");
@@ -1731,6 +1786,10 @@ void precompile(void) {
 	}
 	memset(symtable, 0, sizeof(symbol));
 	memset(localsymstack, 0, sizeof(symbol*));
+#ifdef PLATFORM_DESKTOP
+	if (outformat == FMT_BOS || outformat == FMT_CE) {
+		reverse_argument_stack = true;
+#endif
 	add_sym("bool", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
 	add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
 	add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
@@ -1746,6 +1805,23 @@ void precompile(void) {
 	add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
 	add_sym("int24_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_INT);
 	add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+#ifdef PLATFORM_DESKTOP
+	} else if (outformat == FMT_BXS2307) {
+		add_sym("bool", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
+		add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
+		add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("char", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+		add_sym("short", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("int", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("long", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym("uint8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+		add_sym("uint16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("uint32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym("int8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+		add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+	}
+#endif
 }
 
 void resolve_later(unsigned int offset, symbol *val) {
@@ -1949,6 +2025,7 @@ void compile(void) {
 				save_sym_stack();
 				sym->symtype = SYM_FUNCTION;
 				sym->value = expr + 1 - exprstart;
+				sym->functionargs = _malloc(FUNCTION_MAX_NUM_ARGS+1);
 #ifdef DEBUG
 				printf("Function offset 0x%llX\n", expr + 1 - exprstart);
 #endif
@@ -1979,12 +2056,12 @@ void compile(void) {
 					// printf("added local symbol with type 0x%X\n", ty);
 					add_sym(tkname, tknamelen, SYM_LOCAL, ty, argdepth);
 
+					sym->functionargs[++nargs] = ty;
 					if ((ty & T_MASK) == T_LONG) {
 						argdepth += 6;
 					} else {
 						argdepth += 3;
 					}
-					nargs++;
 					tk_next();
 					if (tk == ',') {
 						tk_next();
@@ -1993,6 +2070,7 @@ void compile(void) {
 						}
 					}
 				}
+				sym->functionargs[0] = nargs;
 				*++expr = nargs;
 				tk_next();
 				if (tk != '{') {
@@ -2044,115 +2122,6 @@ void compile(void) {
 		}
 	nexttoken:;
 		tk_next();
-	}
-}
-
-uint8_t convert_flag_to_char(uint8_t bt) {
-	if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-		if (bt == T_BOOL_ZF) {
-			EMIT_LD_A_IMM(out, 1);
-			EMIT_JR_Z_IMM(out, L_SUB_A_A);
-			EMIT_SUB_A_A(out);
-		} else if (bt == T_BOOL_NZF) {
-			EMIT_LD_A_IMM(out, 1);
-			EMIT_JR_NZ_IMM(out, L_SUB_A_A);
-			EMIT_SUB_A_A(out);
-		} else if (bt == T_BOOL_CF) {
-			EMIT_CCF(out);
-			EMIT_SBC_A_A(out);
-			EMIT_INC_A(out);
-		} else {
-			EMIT_SBC_A_A(out);
-			EMIT_INC_A(out);
-		}
-		return T_CHAR;
-	}
-	return bt;
-}
-
-uint8_t convert_to_zf(uint8_t bt, bool z) {
-	if (bt == T_CHAR) {
-		EMIT_OR_A(out);
-		bt = T_BOOL_ZF;
-	} else if (bt == T_WORD) {
-		EMIT_LD_A_H(out);
-		EMIT_OR_L(out);
-		bt = T_BOOL_ZF;
-	} else if (bt == T_INT) {
-		EMIT_ADD_HL_BC(out);
-		EMIT_OR_A(out);
-		EMIT_SBC_HL_BC(out);
-		bt = T_BOOL_ZF;
-	} else if (bt == T_LONG) {
-		EMIT_ADD_HL_BC(out);
-		EMIT_XOR_A(out);
-		EMIT_LD_D_A(out);
-		EMIT_LD_A_E(out);
-		EMIT_SBC_HL_BC(out);
-		EMIT_SBC_A_D(out);
-		bt = T_BOOL_ZF;
-	} else if (bt == T_BOOL_CF) {
-		EMIT_SBC_A_A(out);
-		EMIT_AND_IMM(out, 1);
-		bt = T_BOOL_ZF;
-	} else if (bt == T_BOOL_NCF) {
-		EMIT_SBC_A_A(out);
-		EMIT_INC_A(out);
-		bt = T_BOOL_ZF;
-	}
-	if (z) {
-		if (bt == T_BOOL_ZF) {
-			EMIT_LD_A_IMM(out, 1);
-			EMIT_JR_Z_IMM(out, L_XOR_A);
-			EMIT_XOR_A(out);
-			EMIT_OR_A(out);
-		}
-		return T_BOOL_NZF;
-	} else {
-		if (bt == T_BOOL_NZF) {
-			EMIT_LD_A_IMM(out, 1);
-			EMIT_JR_NZ_IMM(out, L_XOR_A);
-			EMIT_XOR_A(out);
-			EMIT_OR_A(out);
-		}
-		return T_BOOL_ZF;
-	}
-}
-
-void exchage_primary_secondary(uint8_t bt) {
-	if (bt == T_LONG) {
-		EMIT_PUSH_BC(out);
-		EMIT_LD_C_A(out);
-		EMIT_LD_A_E(out);
-		EMIT_LD_E_C(out);
-		EMIT_EX_IND_SP_HL(out);
-		EMIT_POP_BC(out);
-	} else {
-		if (bt == T_WORD) {
-			EMIT_SIS_SUFFIX(out);
-		}
-		if (bt != T_CHAR) {
-			EMIT_EX_DE_HL(out);
-		}
-		if (bt == T_CHAR) {
-			EMIT_LD_C_A(out);
-			EMIT_LD_A_E(out);
-			EMIT_LD_E_C(out);
-		}
-	}
-}
-
-void exchage_for_boot_math(uint8_t bt) {
-	if (bt == T_CHAR) {
-		EMIT_LD_C_L(out);
-		EMIT_LD_B_E(out);
-	} else if (bt == T_WORD) {
-		EMIT_LD_C_E(out);
-		EMIT_LD_B_D(out);
-	} else if (bt != T_LONG) {
-		EMIT_PUSH_HL(out);
-		EMIT_POP_BC(out);
-		EMIT_EX_DE_HL(out);
 	}
 }
 
@@ -2233,1792 +2202,31 @@ void try_resolve_symbols(unsigned int offset) {
 //	printf("\n");
 }
 
-#define LOAD_HL(a) if ((unsigned)(a) == 0) {EMIT_OR_A(out); EMIT_SBC_HL_HL(out);} else if ((unsigned)(a) == -1) {EMIT_SCF(out); EMIT_SBC_HL_HL(out);} else if (!(hlisconst && hlvalue == (unsigned)(a))) { EMIT_LD_HL_IMM(out, (unsigned)(a)); } hlvalue = (a); hlisconst = true;
-#define LOAD_DE(a) if (!(deisconst && devalue == (unsigned)(a))) {EMIT_LD_DE_IMM(out, (unsigned)(a));} devalue = (a); deisconst = true;
-#define LOAD_BC(a) if (!(bcisconst && bcvalue == (unsigned)(a))) {EMIT_LD_BC_IMM(out, (unsigned)(a));} bcvalue = (a); bcisconst = true;
+#include "platform/ez80gen.h"
+
+#ifdef PLATFORM_DESKTOP
+#include "platform/BxS2307gen.h"
 
 void assemble(void) {
-	bool argispowerof2 = false, hlisconst = false, deisconst = false, bcisconst = false;
-	unsigned int hlvalue, devalue, bcvalue;
-	int op = 0, oldopcode;
-	_ptr arg, *expr = exprstart;
-	uint8_t l, bt = T_VOID, *leaveaddress = NULL, *last_compare_ptr = NULL, *prevout = out, *prevprevout = out;
-	symbol *sym, *mainsym;
-	uint8_t *addrtmp;
-
-	lno = 0;
-
-	if ((mainsym = find_sym("main", 0)) == NULL) {
-		error("Missing function main()");
-	}
-
-	if (outformat == FMT_BOS) {
-		memcpy(out, "\x18\x04REX", 6);
-		out += 6;
-	} else if (outformat == FMT_CE) {
-		memcpy(out, "\xEF\x7B", 2);
-		out += 2;
-		PROGRAM_ORIGIN -= 2;
-	} else {
-		error("Invalid output format");
-	}
-	EMIT_LD_IND_IMM_SP(out, 0);
-	errsp_offset = out - (outstart + 3);
-	EMIT_CALL_IMM(out, TI_RunIndicOff);
-	EMIT_CALL_IMM(out, TI_HomeUp);
-	EMIT_CALL_IMM(out, 0);
-	resolve_later(out - (outstart + 3), mainsym);
-	exitroutineptr = PROGRAM_ORIGIN + out - outstart;
-	addrtmp = exitroutineptr + 1;
-	EMIT_LD_SP_IMM(out, 0);
-	memcpy(&outstart[errsp_offset], &addrtmp, 3);
-	EMIT_CALL_IMM(out, TI_RunIndicOn);
-	EMIT_JP_IMM(out, TI_HomeUp);
-	// expr++;
-	while (1) {
-		prevprevout = prevout;
-		prevout = out;
-		try_resolve_symbols(expr - exprstart);
-#ifdef DEBUG
-		printf("out offset: %llu expr offset: %llu\n", out-outstart, expr-exprstart);
-#endif
-		oldopcode = op;
-		op = *expr++;
-		if (expr >= data_start) {
-			break;
-		}
-		arg = *expr;
-		if (arg > 0) {
-			while (!(arg & 1)) {
-				arg >>= 1;
-			}
-			argispowerof2 = (arg > 1);
-		} else {
-			argispowerof2 = false;
-		}
-		arg = *expr;
-		switch (op) {
-			case IR_NOP:
-				break;
-			case IR_IMM:
-				expr++;
-				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
-					out = prevprevout;
-					LOAD_DE(arg);
-					expr++;
-				} else {
-					LOAD_HL(arg);
-				}
-				bt = T_INT;
-				break;
-			case IR_IMM_PROG_OFFSET:
-				expr++;
-				resolve_later(out + 1 - outstart, arg);
-				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
-					out = prevprevout;
-					EMIT_LD_DE_IMM(out, 0);
-					expr++;
-					deisconst = false;
-				} else {
-					EMIT_LD_HL_IMM(out, 0);
-					hlisconst = false;
-				}
-				break;
-			case IR_IMM_8:
-				expr++;
-				if (expr[-2] == IR_PUSH && *expr == IR_EX_SEC_PRI) {
-					out = prevprevout;
-					EMIT_LD_E_IMM(out, (unsigned)arg);
-					expr++;
-					deisconst = false;
-				} else {
-					EMIT_LD_A_IMM(out, (unsigned)arg);
-				}
-				bt = T_CHAR;
-				break;
-			case IR_IMM_32:
-				expr++;
-				if (expr[-2] == IR_PUSH_32 && expr[1] == IR_EX_SEC_PRI) {
-					out = prevprevout;
-					LOAD_BC(arg);
-					EMIT_LD_A_IMM(out, (unsigned)*expr);
-					expr++;
-				} else {
-					LOAD_HL(arg);
-					EMIT_LD_E_IMM(out, (unsigned)*expr);
-					deisconst = false;
-				}
-				expr++;
-				bt = T_LONG;
-				break;
-			case IR_IMM_32_SEC:
-				expr++;
-				LOAD_BC(arg);
-				EMIT_LD_A_IMM(out, (unsigned)*expr);
-				expr++;
-				bcisconst = true;
-				bcvalue = arg;
-				bt = T_LONG;
-				break;
-			case IR_PUSH:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_LONG) {
-					EMIT_PUSH_HL(out);
-					EMIT_PUSH_DE(out);
-				} else if (bt == T_CHAR) {
-					EMIT_LD_L_A(out);
-					EMIT_PUSH_HL(out);
-				} else {
-					EMIT_PUSH_HL(out);
-				}
-				break;
-			case IR_PUSH_IMM_32:
-				expr++;
-				LOAD_BC(arg);
-				EMIT_PUSH_BC(out);
-				arg = *expr++;
-				EMIT_LD_C_IMM(out, (unsigned)arg);
-				EMIT_PUSH_BC(out);
-				bcisconst = false;
-				break;
-			case IR_PUSH_32:
-				EMIT_PUSH_HL(out);
-			case IR_PUSH_SEC:
-				EMIT_PUSH_DE(out);
-				break;
-			case IR_PUSH_TER:
-				EMIT_PUSH_BC(out);
-				break;
-			case IR_POP:
-				EMIT_POP_HL(out);
-				hlisconst = false;
-				break;
-			case IR_POP_SEC:
-				if (bt == T_LONG) {
-					EMIT_POP_BC(out);
-					EMIT_XOR_A(out);	
-				} else {
-					EMIT_POP_DE(out);
-				}
-				deisconst = false;
-				break;
-			case IR_POP_TER:
-				EMIT_POP_BC(out);
-				bcisconst = false;
-				break;
-			case IR_POP_32:
-				EMIT_POP_BC(out);
-				EMIT_LD_A_C(out);
-				EMIT_POP_BC(out);
-				bcisconst = false;
-				break;
-			case IR_EX_SEC_PRI:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_LONG) {
-					bcisconst = false;
-				}
-				deisconst = false;
-				hlisconst = false;
-				exchage_primary_secondary(bt);
-				break;
-			case IR_CALL:
-				expr++;
-				if (expr[0] == IR_ADJ && (expr[2] == IR_LEAVE || expr[2] == IR_EXIT)) {
-					EMIT_LD_SP_IX(out);
-					EMIT_POP_IX(out);
-					resolve_later(out + 1 - outstart, arg);
-					EMIT_JP_IMM(out, 0);
-					expr = &expr[3];
-				} else if (expr[0] == IR_LEAVE || expr[0] == IR_EXIT) {
-					EMIT_LD_SP_IX(out);
-					EMIT_POP_IX(out);
-					resolve_later(out + 1 - outstart, arg);
-					EMIT_JP_IMM(out, 0);
-					expr++;
-				} else {
-					resolve_later(out + 1 - outstart, arg);
-					EMIT_CALL_IMM(out, 0);
-				}
-				bt = ((symbol*)arg)->valtype;
-				bcisconst = false;
-				deisconst = false;
-				hlisconst = false;
-				break;
-			case IR_ADJ:
-				expr++;
-				if (arg <= 15) {
-					int i = 0;
-					while (i < arg) {
-						EMIT_POP_BC(out);
-						i += 3;
-					}
-					bcisconst = false;
-				} else {
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-					EMIT_ADD_HL_SP(out);
-					EMIT_LD_SP_HL(out);
-					hlisconst = false;
-				}
-				break;
-			case IR_ENTER:
-				expr++;
-				if (arg == 0) {
-					EMIT_CALL_IMM(out, TI__frameset0);
-				} else {
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__frameset);
-				}
-				leaveaddress = NULL;
-				break;
-			case IR_LEAVE:
-				if (leaveaddress != NULL && (unsigned)(leaveaddress+0x80+L_JR_IMM-out)<0x100) {
-					EMIT_JR_IMM(out, leaveaddress-out+L_JR_IMM);
-				} else {
-					leaveaddress = out;
-					EMIT_LD_SP_IX(out);
-					EMIT_POP_IX(out);
-					EMIT_RET(out);
-				}
-				break;
-			case IR_EXIT:
-				expr++;
-				resolve_later(out + 1 - outstart, 0);
-				EMIT_JP_IMM(out, 0);
-				break;
-			case IR_PUSH_IMM:
-				expr++;
-				LOAD_BC(arg);
-				EMIT_PUSH_BC(out);
-				break;
-			case IR_LEA_LOCAL:
-				expr++;
-				if ((unsigned)(arg+0x80) < 0x100) {
-					l = *expr++;
-					if ((expr[-3] == IR_PUSH || expr[-3] == IR_PUSH_32) && *expr == IR_EX_SEC_PRI) {
-						expr++;
-						out = prevprevout;
-						if (l == IR_LOAD_CHAR) {
-							EMIT_LD_E_IND_IX_DD(out, (unsigned)arg);
-							bt = T_CHAR;
-							deisconst = false;
-						} else if (l == IR_LOAD_WORD) {
-							EMIT_PUSH_HL(out);
-							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-							EMIT_SIS_SUFFIX(out);
-							EMIT_EX_DE_HL(out);
-							EMIT_POP_HL(out);
-							bt = T_WORD;
-							deisconst = false;
-						} else if (l == IR_LOAD_INT) {
-							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-							bt = T_INT;
-							deisconst = false;
-						} else if (l == IR_LOAD_LONG) {
-							if ((unsigned)(arg+3+0x80) < 0x100) {
-								EMIT_LD_BC_IND_IX_DD(out, (unsigned)arg);
-								EMIT_LD_A_IND_IX_DD(out, arg+3);
-							} else {
-								EMIT_PUSH_IX(out);
-								EMIT_LD_BC_IMM(out, (unsigned)arg);
-								EMIT_ADD_IX_BC(out);
-								EMIT_LD_BC_IND_IX_DD(out, 0);
-								EMIT_LD_A_IND_IX_DD(out, 3);
-								EMIT_POP_IX(out);
-							}
-							bt = T_LONG;
-							bcisconst = false;
-						} else {
-							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-							bt = T_PTR;
-							expr--;
-							expr--;
-							deisconst = false;
-						}
-					} else {
-						if (l == IR_LOAD_CHAR) {
-							EMIT_LD_A_IND_IX_DD(out, (unsigned)arg);
-							bt = T_CHAR;
-						} else if (l == IR_LOAD_WORD) {
-							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-							EMIT_SIS_SUFFIX(out);
-							EMIT_EX_DE_HL(out);
-							bt = T_WORD;
-							deisconst = false;
-							hlisconst = false;
-						} else if (l == IR_LOAD_INT) {
-							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-							bt = T_INT;
-							hlisconst = false;
-						} else if (l == IR_LOAD_LONG) {
-							if ((unsigned)(arg+3+0x80) < 0x100) {
-								EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-								EMIT_LD_E_IND_IX_DD(out, arg+3);
-							} else {
-								EMIT_PUSH_IX(out);
-								EMIT_LD_BC_IMM(out, (unsigned)arg);
-								EMIT_ADD_IX_BC(out);
-								EMIT_LD_HL_IND_IX_DD(out, 0);
-								EMIT_LD_E_IND_IX_DD(out, 3);
-								EMIT_POP_IX(out);
-								bcisconst = false;
-							}
-							bt = T_LONG;
-							deisconst = false;
-							hlisconst = false;
-						} else {
-							EMIT_LEA_HL_IX_DD(out, (unsigned)arg);
-							bt = T_PTR;
-							expr--;
-							hlisconst = false;
-						}
-					}
-				} else {
-					EMIT_LEA_HL_IX_DD(out, 0);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_ADD_HL_BC(out);
-					bt = T_PTR;
-					bcisconst = false;
-					hlisconst = false;
-				}
-				break;
-			case IR_LEA_GLOBAL:
-				expr++;
-				l = *expr++;
-				if (l == IR_LOAD_CHAR) {
-					EMIT_LD_A_IND_IMM(out, (unsigned)arg);
-					bt = T_CHAR;
-				} else if (l == IR_LOAD_WORD) {
-					EMIT_LD_DE_IND_IMM(out, (unsigned)arg);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_EX_DE_HL(out);
-					bt = T_WORD;
-					deisconst = false;
-					hlisconst = false;
-				} else if (l == IR_LOAD_INT) {
-					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
-					bt = T_INT;
-					hlisconst = false;
-				} else if (l == IR_LOAD_LONG) {
-					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
-					EMIT_LD_DE_IND_IMM(out, (unsigned)(arg+3));
-					bt = T_LONG;
-					deisconst = false;
-				} else {
-					expr--;
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-					bt = T_PTR;
-					hlisconst = false;
-				}
-				break;
-			case IR_STORE_LOCAL:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				l = *expr++;
-				if (bt == T_CHAR && l != T_CHAR) {
-					EMIT_OR_A(out);
-					EMIT_SBC_HL_HL(out);
-					if (l == T_LONG) {
-						EMIT_LD_E_L(out);
-					}
-					EMIT_LD_L_A(out);
-					bt = l;
-					hlisconst = false;
-				}
-				if ((unsigned)(arg+0x80) < 0x100) {
-					if (l == T_CHAR) {
-						if (bt == T_CHAR) {
-							EMIT_LD_IND_IX_DD_A(out, (unsigned)arg);
-						} else {
-							EMIT_LD_IND_IX_DD_L(out, (unsigned)arg);
-						}
-					} else if (l == T_WORD) {
-						if ((unsigned)(arg+1+0x80) < 0x100) {
-							EMIT_LD_IND_IX_DD_L(out, (unsigned)arg);
-							EMIT_LD_IND_IX_DD_H(out, arg+1);
-						} else {
-							EMIT_INC_IX(out);
-							EMIT_LD_IND_IX_DD_L(out, arg-1);
-							EMIT_LD_IND_IX_DD_H(out, (unsigned)arg);
-							EMIT_DEC_IX(out);
-						}
-					} else if (l == T_LONG) {
-						if ((unsigned)(arg+3+0x80) < 0x100) {
-							EMIT_LD_IND_IX_DD_HL(out, (unsigned)arg);
-							EMIT_LD_IND_IX_DD_E(out, (unsigned)(arg+3));
-						} else {
-							EMIT_PUSH_IX(out);
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
-							EMIT_ADD_IX_BC(out);
-							EMIT_LD_IND_IX_DD_HL(out, 0);
-							EMIT_LD_IND_IX_DD_E(out, 3);
-							EMIT_POP_IX(out);
-							bcisconst = false;
-						}
-					} else {
-						EMIT_LD_IND_IX_DD_HL(out, (unsigned)arg);
-					}
-				} else {
-					if (l != T_CHAR) {
-						EMIT_PUSH_HL(out);
-						EMIT_PUSH_HL(out);
-					}
-					EMIT_LEA_HL_IX_DD(out, 0);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_ADD_HL_BC(out);
-					if (l == T_CHAR) {
-						EMIT_LD_IND_HL_A(out);
-					} else {
-						EMIT_POP_BC(out);
-						if (l == T_WORD) {
-							EMIT_LD_IND_HL_C(out);
-							EMIT_INC_HL(out);
-							EMIT_LD_IND_HL_B(out);
-						} else {
-							EMIT_LD_IND_HL_BC(out);
-							if (l == T_LONG) {
-								EMIT_INC_HL(out);
-								EMIT_INC_HL(out);
-								EMIT_INC_HL(out);
-								EMIT_LD_IND_HL_E(out);
-							}
-						}
-						EMIT_POP_HL(out);
-					}
-					bcisconst = false;
-				}
-				break;
-			case IR_STORE_GLOBAL:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				l = *expr++;
-				if (bt == T_CHAR && l != T_CHAR) {
-					EMIT_OR_A(out);
-					EMIT_SBC_HL_HL(out);
-					if (l == T_LONG) {
-						EMIT_LD_E_L(out);
-					}
-					EMIT_LD_L_A(out);
-					bt = l;
-					hlisconst = false;
-				}
-				if (l == T_CHAR) {
-					if (bt != T_CHAR) {
-						EMIT_LD_A_L(out);
-					}
-					EMIT_LD_IND_IMM_A(out, (unsigned)arg);
-				} else if (l == T_WORD) {
-					EMIT_EX_DE_HL(out);
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
-					EMIT_LD_IND_HL_E(out);
-					EMIT_INC_HL(out);
-					EMIT_LD_IND_HL_D(out);
-					EMIT_EX_DE_HL(out);
-					deisconst = false;
-				} else if (l == T_LONG) {
-					EMIT_LD_IND_IMM_HL(out, (unsigned)arg);
-					EMIT_LD_A_E(out);
-					EMIT_LD_IND_IMM_A(out, arg+3);
-				} else {
-					EMIT_LD_IND_IMM_HL(out, (unsigned)arg);
-				}
-				break;
-			case IR_LOAD_CHAR:
-				EMIT_LD_A_IND_HL(out);
-				bt = T_CHAR;
-				break;
-			case IR_LOAD_WORD:
-				EMIT_LD_L_IND_HL(out);
-				EMIT_INC_HL(out);
-				EMIT_LD_H_IND_HL(out);
-				EMIT_SIS_SUFFIX(out);
-				EMIT_EX_DE_HL(out);
-				deisconst = false;
-				hlisconst = false;
-				bt = T_WORD;
-				break;
-			case IR_LOAD_INT:
-				EMIT_LD_HL_IND_HL(out);
-				bt = T_INT;
-				hlisconst = false;
-				break;
-			case IR_LOAD_LONG:
-				EMIT_LD_DE_IND_HL(out);
-				EMIT_INC_HL(out);
-				EMIT_INC_HL(out);
-				EMIT_INC_HL(out);
-				EMIT_LD_L_IND_HL(out);
-				EMIT_EX_DE_HL(out);
-				bt = T_LONG;
-				deisconst = false;
-				hlisconst = false;
-				break;
-			case IR_COMPARE_Z:
-				if (bt < T_BOOL_CF || bt > T_BOOL_NZF) {
-					last_compare_ptr = out;
-					if (bt == T_CHAR) {
-						EMIT_OR_A(out);
-						bt = T_BOOL_ZF;
-					} else if (bt == T_WORD) {
-						EMIT_LD_A_H(out);
-						EMIT_OR_L(out);
-						bt = T_BOOL_ZF;
-					} else if (bt == T_LONG) {
-						EMIT_LD_C_IMM(out, 0);
-						EMIT_ADD_HL_BC(out);
-						EMIT_ADC_A_C(out);
-						EMIT_SBC_HL_BC(out);
-						EMIT_SBC_A_C(out);
-						bt = T_BOOL_ZF;
-					} else {
-						EMIT_ADD_HL_BC(out);
-						EMIT_SBC_HL_BC(out);
-						bt = T_BOOL_ZF;
-					}
-				}
-				break;
-			case IR_COMPARE_NZ:
-				if (bt < T_BOOL_CF || bt > T_BOOL_NZF) {
-					last_compare_ptr = out;
-					if (bt == T_CHAR) {
-						EMIT_OR_A(out);
-						bt = T_BOOL_NZF;
-					} else if (bt == T_WORD) {
-						EMIT_LD_A_H(out);
-						EMIT_OR_L(out);
-						bt = T_BOOL_NZF;
-					} else if (bt == T_LONG) {
-						EMIT_LD_C_IMM(out, 0);
-						EMIT_ADD_HL_BC(out);
-						EMIT_ADC_A_C(out);
-						EMIT_SBC_HL_BC(out);
-						EMIT_SBC_A_C(out);
-						bt = T_BOOL_NZF;
-					} else {
-						EMIT_ADD_HL_BC(out);
-						EMIT_SBC_HL_BC(out);
-						bt = T_BOOL_NZF;
-					}
-				} else {
-					bt ^= 1;
-				}
-				break;
-			case IR_LOR:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_OR_A(out);
-					EMIT_JR_NZ_IMM(out, L_OR_E);
-					EMIT_OR_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_LD_A_H(out);
-					EMIT_OR_L(out);
-					EMIT_JR_NZ_IMM(out, L_OR_D+L_OR_E);
-					EMIT_OR_D(out);
-					EMIT_OR_E(out);
-				} else if (bt == T_LONG) {
-					EMIT_OR_E(out);
-					EMIT_JR_NZ_IMM(out, L_ADD_HL_DE+L_SBC_HL_DE+L_JR_NZ_IMM+L_EX_DE_HL+L_SBC_HL_BC);
-					EMIT_ADD_HL_DE(out);
-					EMIT_SBC_HL_DE(out);
-					EMIT_JR_NZ_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
-					EMIT_EX_DE_HL(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else {
-					EMIT_ADD_HL_BC(out);
-					EMIT_OR_A(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_JR_NZ_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
-					EMIT_EX_DE_HL(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NZF;
-				break;
-			case IR_LAND:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_OR_A(out);
-					EMIT_JR_Z_IMM(out, L_OR_E);
-					EMIT_OR_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_LD_A_H(out);
-					EMIT_OR_L(out);
-					EMIT_JR_Z_IMM(out, L_OR_D+L_OR_E);
-					EMIT_OR_D(out);
-					EMIT_OR_E(out);
-				} else if (bt == T_LONG) {
-					EMIT_OR_E(out);
-					EMIT_JR_Z_IMM(out, L_ADD_HL_DE+L_SBC_HL_DE+L_JR_NZ_IMM+L_EX_DE_HL+L_SBC_HL_DE);
-					EMIT_ADD_HL_DE(out);
-					EMIT_SBC_HL_DE(out);
-					EMIT_JR_Z_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
-					EMIT_EX_DE_HL(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else {
-					EMIT_ADD_HL_BC(out);
-					EMIT_OR_A(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_JR_NZ_IMM(out, L_EX_DE_HL+L_SBC_HL_DE);
-					EMIT_EX_DE_HL(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NZF;
-				break;
-			case IR_NOT:
-				if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-					bt ^= 1;
-				} else if (bt == T_CHAR) {
-					EMIT_NEG(out);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__snot);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__lnot);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__inot);
-				}
-				hlisconst = false;
-				break;
-			case IR_OR:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_OR_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__sor);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__lor);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__ior);
-				}
-				hlisconst = false;
-				break;
-			case IR_AND:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_AND_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__sand);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__land);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__iand);
-				}
-				hlisconst = false;
-				break;
-			case IR_COMPARE_EQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false; // DE might not also be const anymore?
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_ZF;
-				break;
-			case IR_COMPARE_NEQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NZF;
-				break;
-			case IR_COMPARE_LT:
-				bt = convert_flag_to_char(bt);
-				EMIT_SCF(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NCF;
-				break;
-			case IR_COMPARE_LTEQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NCF;
-				break;
-			case IR_COMPARE_GTEQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_SCF(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_CF;
-				break;
-			case IR_COMPARE_GT:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_CF;
-				break;
-			case IR_SHL:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_LD_B_L(out);
-				} else {
-					EMIT_LD_C_L(out);
-				}
-				EMIT_EX_DE_HL(out);
-				if (bt == T_CHAR) {
-					EMIT_CALL_IMM(out, TI__bshl);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__sshl);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__lshl);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__ishl);
-				}
-				bcisconst = false;
-				hlisconst = false;
-				break;
-			case IR_SHR:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_LD_B_L(out);
-				} else {
-					EMIT_LD_C_L(out);
-				}
-				EMIT_EX_DE_HL(out);
-				if (bt == T_CHAR) {
-					EMIT_CALL_IMM(out, TI__bshru);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__sshru);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__lshru);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__ishru);
-				}
-				bcisconst = false;
-				hlisconst = false;
-				break;
-			case IR_ADD:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_ADD_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_ADD_HL_DE(out);
-				} else if (bt == T_LONG) {
-					EMIT_ADD_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
-				} else {
-					EMIT_ADD_HL_DE(out);
-				}
-				hlisconst = false;
-				break;
-			case IR_SUB:
-				bt = convert_flag_to_char(bt);
-				if (bt != T_LONG) {
-					exchage_primary_secondary(bt);
-				}
-				if (bt == T_CHAR) {
-					EMIT_SUB_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-				} else if (bt == T_LONG) {
-					EMIT_OR_A(out);
-					EMIT_EX_DE_HL(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
-				} else {
-					EMIT_OR_A(out);
-					EMIT_SBC_HL_BC(out);
-				}
-				hlisconst = false;
-				break;
-			case IR_DIV:
-				bt = convert_flag_to_char(bt);
-				exchage_for_boot_math(bt);
-				if (bt == T_CHAR) {
-					EMIT_LD_L_A(out);
-					EMIT_LD_H_IMM(out, 0);
-					EMIT_LD_C_E(out);
-					EMIT_LD_B_H(out);
-					EMIT_CALL_IMM(out, TI__sdivu);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__sdivu);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__ldivu);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__idivu);
-				}
-				bcisconst = false;
-				hlisconst = false;
-				break;
-			case IR_MUL:
-				bt = convert_flag_to_char(bt);
-				if (bt != T_CHAR) {
-					exchage_for_boot_math(bt);
-				}
-				if (bt == T_CHAR) {
-					EMIT_LD_D_A(out);
-					EMIT_MLT_DE(out);
-					EMIT_EX_DE_HL(out);
-					bt = T_INT;
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__smulu);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__lmulu);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__imulu);
-				}
-				bcisconst = false;
-				hlisconst = false;
-				break;
-			case IR_MOD:
-				bt = convert_flag_to_char(bt);
-				exchage_for_boot_math(bt);
-				if (bt == T_CHAR) {
-					EMIT_LD_L_A(out);
-					EMIT_LD_H_IMM(out, 0);
-					EMIT_LD_C_E(out);
-					EMIT_LD_B_H(out);
-					EMIT_CALL_IMM(out, TI__sremu);
-				} else if (bt == T_WORD) {
-					EMIT_CALL_IMM(out, TI__sremu);
-				} else if (bt == T_LONG) {
-					EMIT_CALL_IMM(out, TI__lremu);
-					deisconst = false;
-				} else {
-					EMIT_CALL_IMM(out, TI__iremu);
-				}
-				bcisconst = false;
-				hlisconst = false;
-				break;
-			case IR_NEG:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CPL(out);
-				} else {
-					EMIT_EX_DE_HL(out);
-					EMIT_XOR_A(out);
-					EMIT_SBC_HL_HL(out);
-					if (bt == T_WORD) {
-						EMIT_SIS_SUFFIX(out);
-						EMIT_SBC_HL_DE(out);
-					} else if (bt == T_LONG) {
-						EMIT_LD_C_A(out);
-						EMIT_LD_A_E(out);
-						EMIT_SBC_HL_BC(out);
-						EMIT_SBC_A_C(out);
-						EMIT_LD_E_A(out);
-						bcisconst = false;
-					} else {
-						EMIT_SBC_HL_DE(out);
-					}
-				}
-				deisconst = false;
-				hlisconst = false;
-				break;
-			case IR_INC:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_INC_A(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_INC_HL(out);
-				} else if (bt == T_LONG) {
-					EMIT_LD_BC_IMM(out, 1);
-					EMIT_ADD_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
-				} else {
-					EMIT_INC_HL(out);
-				}
-				hlisconst = false;
-				break;
-			case IR_DEC:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_DEC_A(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_DEC_HL(out);
-				} else if (bt == T_LONG) {
-					EMIT_LD_BC_IMM(out, 1);
-					EMIT_OR_A(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
-				} else {
-					EMIT_DEC_HL(out);
-				}
-				hlisconst = false;
-				break;
-			case IR_INC_SEC:
-				EMIT_INC_DE(out);
-				deisconst = false;
-				break;
-			case IR_INC_TER:
-				EMIT_INC_BC(out);
-				bcisconst = false;
-				break;
-			case IR_DEC_SEC:
-				EMIT_DEC_DE(out);
-				deisconst = false;
-				break;
-			case IR_DEC_TER:
-				EMIT_DEC_BC(out);
-				bcisconst = false;
-				break;
-			case IR_OR_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_OR_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_A_H(out);
-					EMIT_OR_IMM(out, (unsigned)arg>>8);
-					EMIT_LD_H_A(out);
-					EMIT_LD_A_L(out);
-					EMIT_OR_IMM(out, arg&0xff);
-					EMIT_LD_L_A(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__lor);
-					deisconst = false;
-				} else {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__ior);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				break;
-			case IR_AND_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_AND_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_A_H(out);
-					EMIT_AND_IMM(out, (unsigned)arg>>8);
-					EMIT_LD_H_A(out);
-					EMIT_LD_A_L(out);
-					EMIT_AND_IMM(out, arg&0xff);
-					EMIT_LD_L_A(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__land);
-					deisconst = false;
-				} else {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__iand);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				break;
-			case IR_COMPARE_EQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_ZF;
-				break;
-			case IR_COMPARE_NEQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_NZF;
-				break;
-			case IR_COMPARE_LT_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_CF;
-				break;
-			case IR_COMPARE_LTEQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, arg+1);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_CF;
-				break;
-			case IR_COMPARE_GT_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, arg+1);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_NCF;
-				break;
-			case IR_COMPARE_GTEQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_NCF;
-				break;
-			case IR_SHL_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					if (arg >= 8) {
-						EMIT_XOR_A(out);
-					} else if (arg > L_LD_B_E+L_ADD_A_A+L_DJNZ_IMM) {
-						EMIT_LD_B_IMM(out, (unsigned)arg);
-						EMIT_ADD_A_A(out);
-						EMIT_DJNZ_IMM(out, -(L_DJNZ_IMM+L_ADD_A_A));
-						bcisconst = false;
-					} else {
-						while (arg-- > 0) {
-							EMIT_ADD_A_A(out);
-						}
-					}
-				} else if (bt == T_LONG) {
-					if (arg >= 32) {
-						EMIT_XOR_A(out);
-						EMIT_LD_E_A(out);
-						EMIT_SBC_HL_HL(out);
-					} else if (arg > 1) {
-						EMIT_LD_C_IMM(out, (unsigned)arg);
-						EMIT_CALL_IMM(out, TI__lshl);
-					} else {
-						EMIT_XOR_A(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADC_A_E(out);
-						EMIT_LD_E_A(out);
-					}
-				} else {
-					if (bt == T_WORD && arg >= 16) {
-						EMIT_LD_L_IMM(out, 0);
-						EMIT_LD_H_L(out);
-					} else if (bt == T_INT && arg >= 24) {
-						EMIT_OR_A(out);
-						EMIT_SBC_HL_HL(out);
-					} else if (arg > L_LD_B_E+L_ADD_HL_HL+L_DJNZ_IMM) {
-						EMIT_LD_B_IMM(out, (unsigned)arg);
-						EMIT_ADD_HL_HL(out);
-						EMIT_DJNZ_IMM(out, -(L_DJNZ_IMM+L_ADD_HL_HL));
-						bcisconst = false;
-					} else {
-						while (arg-- > 0) {
-							EMIT_ADD_HL_HL(out);
-						}
-					}
-					/*
-					if (bt == T_WORD) {
-						EMIT_SIS_SUFFIX(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_EX_DE_HL(out);
-						deisconst = false;
-					}
-					*/
-				}
-				hlisconst = false;
-				break;
-			case IR_SHR_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					if (arg >= 8) {
-						EMIT_XOR_A(out);
-					} else if (arg > (L_LD_B_E+L_OR_A+L_RRA+L_DJNZ_IMM)/(L_OR_A+L_RRA)) {
-						EMIT_LD_B_IMM(out, (unsigned)arg);
-						EMIT_OR_A(out);
-						EMIT_RRA(out);
-						EMIT_DJNZ_IMM(out, -(L_DJNZ_IMM+L_RRA+L_OR_A));
-						bcisconst = false;
-					} else {
-						while (arg-- > 0) {
-							EMIT_OR_A(out);
-							EMIT_RRA(out);
-						}
-					}
-				} else if (bt == T_WORD) {
-					EMIT_LD_C_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__sshru);
-					bcisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__lshru);
-					bcisconst = false;
-				} else {
-					EMIT_LD_C_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__ishru);
-					bcisconst = false;
-				}
-				hlisconst = false;
-				break;
-			case IR_ADD_CONST:
-				expr++;
-				if (arg != 0) {
-					bt = convert_flag_to_char(bt);
-					if (bt == T_CHAR) {
-						if (arg == 1) {
-							EMIT_INC_A(out);
-						} else if (arg == -1) {
-							EMIT_DEC_A(out);
-						} else {
-							EMIT_ADD_A_IMM(out, (unsigned)arg);
-						}
-					} else if (bt == T_LONG) {
-						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_XOR_A(out);
-						EMIT_ADD_HL_BC(out);
-						EMIT_ADC_A_E(out);
-						EMIT_LD_E_A(out);
-						deisconst = false;
-						bcisconst = true;
-						bcvalue = arg;
-					} else {
-						if (bt == T_WORD) {
-							EMIT_SIS_SUFFIX(out);
-						}
-						if (arg == 1) {
-							EMIT_INC_HL(out);
-						} else if (arg == -1) {
-							EMIT_DEC_HL(out);
-						} else {
-							out -= L_SIS_SUFFIX;
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
-							if (bt == T_WORD) {
-								EMIT_SIS_SUFFIX(out);
-							}
-							EMIT_ADD_HL_BC(out);
-						}
-						bcisconst = true;
-						bcvalue = arg;
-					}
-				}
-				hlisconst = false;
-				break;
-			case IR_SUB_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_SUB_A_IMM(out, (unsigned)arg);
-					break;
-				} else if (bt == T_LONG) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_IMM(out, 0);
-					EMIT_LD_E_A(out);
-				} else {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					if (bt == T_WORD) {
-						EMIT_SIS_SUFFIX(out);
-					}
-					EMIT_SBC_HL_BC(out);
-				}
-				bcisconst = true;
-				bcvalue = arg;
-				hlisconst = false;
-				break;
-			case IR_MUL_CONST:
-				expr++;
-				if (arg == 1) {
-					if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-						if (bt == T_BOOL_CF) {
-							EMIT_JR_C_IMM(out, L_LD_HL_IMM);
-							EMIT_OR_A(out);
-						} else if (bt == T_BOOL_ZF) {
-							EMIT_JR_Z_IMM(out, L_LD_HL_IMM);
-							EMIT_OR_A(out);
-						} else if (bt == T_BOOL_NCF) {
-							EMIT_JR_NC_IMM(out, L_LD_HL_IMM);
-						} else {
-							EMIT_JR_NZ_IMM(out, L_LD_HL_IMM);
-							EMIT_OR_A(out);
-						}
-						EMIT_SBC_HL_HL(out);
-						EMIT_JR_IMM(out, L_LD_HL_IMM);
-						EMIT_LD_HL_IMM(out, (unsigned)arg);
-						hlisconst = false;
-						bt = T_INT;
-					}
-				} else {
-					if (bt == T_CHAR) {
-						EMIT_LD_H_IMM(out, (unsigned)arg);
-						EMIT_LD_L_A(out);
-						EMIT_MLT_HL(out);
-						bt = T_WORD;
-					} else if (bt == T_LONG) {
-						if (arg == 0) {
-							EMIT_OR_A(out);
-							EMIT_SBC_HL_HL(out);
-							EMIT_LD_E_L(out);
-						} else if (arg == 2) {
-							EMIT_LD_A_E(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADC_A_A(out);
-						} else if (arg > 2) {
-							EMIT_XOR_A(out);
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
-							EMIT_CALL_IMM(out, TI__lmulu);
-							bcisconst = true;
-							bcvalue = arg;
-						}
-						deisconst = false;
-					} else {
-						if (arg == 0) {
-							EMIT_OR_A(out);
-							EMIT_SBC_HL_HL(out);
-						} else if (arg == 2) {
-							EMIT_ADD_HL_HL(out);
-						} else if (arg == 3) {
-							EMIT_PUSH_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_POP_DE(out);
-							EMIT_ADD_HL_DE(out);
-							deisconst = false;
-						} else if (arg == 4) {
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-						} else if (arg == 5) {
-							EMIT_PUSH_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_POP_DE(out);
-							EMIT_ADD_HL_DE(out);
-							deisconst = false;
-						} else if (arg == 6) {
-							EMIT_PUSH_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_POP_DE(out);
-							EMIT_ADD_HL_DE(out);
-							EMIT_ADD_HL_DE(out);
-							deisconst = false;
-						} else if (arg == 7) {
-							EMIT_PUSH_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_POP_DE(out);
-							EMIT_ADD_HL_DE(out);
-							EMIT_ADD_HL_DE(out);
-							EMIT_ADD_HL_DE(out);
-							deisconst = false;
-						} else if (arg == 8) {
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-						} else if (arg == 9) {
-							EMIT_PUSH_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_POP_DE(out);
-							EMIT_ADD_HL_DE(out);
-							deisconst = false;
-						} else if (arg == 10) {
-							EMIT_ADD_HL_HL(out);
-							EMIT_PUSH_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_POP_DE(out);
-							EMIT_ADD_HL_DE(out);
-							deisconst = false;
-						} else if (arg == 16) {
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-							EMIT_ADD_HL_HL(out);
-						} else if (arg > 2) {
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
-							EMIT_CALL_IMM(out, TI__imulu);
-							bcisconst = true;
-							bcvalue = arg;
-						}
-					}
-					hlisconst = false;
-				}
-				break;
-			case IR_DIV_CONST:
-				expr++;
-				if (arg != 1) {
-					if (arg == 0) {
-						EMIT_SCF(out);
-						EMIT_SBC_HL_HL(out);
-						bt = T_INT;
-						hlisconst = true;
-						hlvalue = -1;
-						break;
-					} else if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-						if (arg > 1) {
-							EMIT_XOR_A(out);
-							bt = T_CHAR;
-						}
-					} else if (bt == T_CHAR) {
-						if (arg == 2) {
-							EMIT_RRA(out);
-						} else if (arg == 4) {
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-						} else if (arg == 8) {
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-						} else if (arg == 16) {
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-						} else if (arg == 32) {
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-						} else if (arg == 64) {
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-						} else if (arg == 128) {
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-							EMIT_RRA(out);
-						} else if (arg >= 256) {
-							EMIT_XOR_A(out);
-						} else {
-							EMIT_LD_L_A(out);
-							EMIT_LD_H_IMM(out, 0);
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
-							EMIT_CALL_IMM(out, TI__sdivu);
-						}
-					} else if (bt == T_WORD) {
-						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_CALL_IMM(out, TI__sdivu);
-					} else if (bt == T_LONG) {
-						EMIT_XOR_A(out);
-						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_CALL_IMM(out, TI__ldivu);
-					} else {
-						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_CALL_IMM(out, TI__idivu);
-					}
-				}
-				bcisconst = true;
-				bcvalue = arg;
-				hlisconst = false;
-				break;
-			case IR_MOD_CONST:
-				expr++;
-				if (arg == 0) {
-					EMIT_SCF(out);
-					EMIT_SBC_HL_HL(out);
-					bt = T_INT;
-					hlisconst = true;
-					hlvalue = -1;
-					break;
-				} else if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-					bt = convert_flag_to_char(bt);
-				} else if (bt == T_CHAR || bt == T_WORD) {
-					if (bt == T_CHAR) {
-						EMIT_LD_L_A(out);
-						if (!(hlisconst && hlvalue < 256)) {
-							EMIT_LD_H_IMM(out, 0);
-						}
-						EMIT_LD_B_H(out);
-					}
-					EMIT_CALL_IMM(out, TI__sremu);
-					break;
-				} else if (bt == T_LONG) {
-					EMIT_LD_BC_IMM(out, arg);
-					EMIT_XOR_A(out);
-					EMIT_CALL_IMM(out, TI__lremu);
-				} else {
-					EMIT_LD_BC_IMM(out, arg);
-					EMIT_CALL_IMM(out, TI__iremu);
-				}
-				bcisconst = true;
-				bcvalue = arg;
-				hlisconst = false;
-				break;
-			case IR_JMP:
-				expr++;
-				resolve_later(out + 1 - outstart, arg);
-				EMIT_JP_IMM(out, 0);
-				bcisconst = false;
-				deisconst = false;
-				hlisconst = false;
-				break;
-			case IR_BZ:
-				expr++;
-				bt = convert_to_zf(bt, true);
-				resolve_later(out + 1 - outstart, arg);
-				EMIT_JP_Z_IMM(out, 0);
-				break;
-			case IR_BNZ:
-				expr++;
-				bt = convert_to_zf(bt, true);
-				resolve_later(out + 1 - outstart, arg);
-				EMIT_JP_NZ_IMM(out, 0);
-				break;
-			case IR_STRLEN:
-				EMIT_PUSH_HL(out);
-				EMIT_CALL_IMM(out, TI__strlen);
-				EMIT_POP_BC(out);
-				bcisconst = hlisconst;
-				bcvalue = hlvalue;
-				hlisconst = false;
-				break;
-			case IR_STORE:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (arg == T_LONG) {
-					if (bt == T_CHAR) {
-						EMIT_OR_A(out);
-						EMIT_SBC_HL_HL(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_A(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						deisconst = true;
-						devalue = 0;
-						hlisconst = false;
-					} else if (bt == T_LONG) {
-						EMIT_LD_A_E(out);
-						EMIT_LD_IND_BC_A(out);
-						EMIT_PUSH_BC(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_POP_HL(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_E_A(out);
-						bcisconst = false;
-						deisconst = false;
-						hlisconst = false;
-					} else if (bt == T_WORD) {
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_E(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_D(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_SIS_SUFFIX(out);
-						EMIT_EX_DE_HL(out);
-						deisconst = false;
-						hlisconst = false;
-					} else {
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						EMIT_INC_HL(out);
-						EMIT_INC_HL(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_EX_DE_HL(out);
-						deisconst = false;
-					}
-				} else if (arg == T_CHAR) {
-					if (bt != T_CHAR) {
-						EMIT_LD_A_L(out);
-					}
-					EMIT_LD_IND_DE_A(out);
-				} else if (arg == T_WORD) {
-					EMIT_EX_DE_HL(out);
-					if (bt == T_CHAR) {
-						EMIT_LD_IND_HL_A(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_LD_H_IND_HL(out);
-						EMIT_LD_L_A(out);
-					} else {
-						EMIT_LD_IND_HL_E(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_D(out);
-						EMIT_LD_H_D(out);
-						EMIT_LD_L_E(out);
-					}
-					deisconst = false;
-					hlisconst = false;
-					bt = T_WORD;
-				} else { // arg == T_INT or equivalent size type
-					if (bt == T_CHAR) {
-						EMIT_OR_A(out);
-						EMIT_SBC_HL_HL(out);
-						EMIT_LD_L_A(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						hlisconst = false;
-						deisconst = false;
-					} else if (bt == T_WORD) {
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_E(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_D(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						hlisconst = false;
-						deisconst = false;
-					} else {
-						bool tmpbool = hlisconst;
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						hlisconst = deisconst;
-						hlvalue = devalue;
-						deisconst = tmpbool;
-						devalue = hlvalue;
-					}
-				}
-				break;
-			case IR_STRCPY:
-				EMIT_PUSH_BC(out);
-				EMIT_PUSH_HL(out);
-				EMIT_CALL_IMM(out, TI__strcpy);
-				EMIT_POP_HL(out);
-				EMIT_POP_BC(out);
-				deisconst = false;
-				break;
-			case IR_DEFINE_FUNCTION:
-				expr++;
-				expr++;
-				bcisconst = false;
-				deisconst = false;
-				hlisconst = false;
-				break;
-			default:
-#ifdef PLATFORM_DESKTOP
-				printf("Invalid IR code: 0x%X\nLast known valid IR code: 0x%X\n", op, oldopcode);
-#endif
-				error("Internal: Invalid IR code");
-				break;
-		}
+	if (outformat == FMT_BOS || outformat == FMT_CE) {
+		assemble_eZ80();
+	} else if (outformat == FMT_BXS2307) {
+		assemble_BxS2307();
 	}
 }
+#else
+#define assemble assemble_eZ80
+#endif
 
 int main(int argc, char **argv) {
 	unsigned int exprlen, datalen;
 #ifdef PLATFORM_DESKTOP
 	unsigned int bufferlen;
 	FILE *fd;
-	char *buffer;
+	char *buffer, *afile = "a.asm", *bfile = "a.out";
 	_ptr oldopcode;
 	if (argc < 2) {
-		printf("Usage: %s src [bin]\n", argv[0]);
+		printf("Usage: %s src [-o bin] [-f [BOS|CE|BxS2307]]\n", argv[0]);
 		return 0;
 	}
 	if ((fd = fopen(argv[1], "r")) == NULL) {
@@ -4034,6 +2242,38 @@ int main(int argc, char **argv) {
 	}
 	fread(srcdata, srclen, 1, fd);
 	fclose(fd);
+
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "-o")) {
+			if (++i < argc) {
+				bfile = argv[i];
+			} else {
+			missingargument:;
+				printf("Missing argument following %s\n", argv[i-1]);
+			}
+		} else if (!strcmp(argv[i], "-a")) {
+			if (++i < argc) {
+				afile = argv[i];
+			} else {
+				goto missingargument;
+			}
+		} else if (!strcmp(argv[i], "-f")) {
+			if (++i < argc) {
+				if (!strcmp(argv[i], "BOS")) {
+					outformat = FMT_BOS;
+				} else if (!strcmp(argv[i], "CE")) {
+					outformat = FMT_CE;
+				} else if (!strcmp(argv[i], "BxS2307")) {
+					outformat = FMT_BXS2307;
+				} else {
+					printf("Unknown output format specifier \"%s\"\n", argv[i]);
+					return 0;
+				}
+			} else {
+				goto missingargument;
+			}
+		}
+	}
 
 	if ((expr = exprstart = _malloc(IR_OUTPUT_SIZE * sizeof(_ptr))) == NULL) {
 		printf("Failed to malloc %u bytes of space for IR output.\n", (unsigned int)(IR_OUTPUT_SIZE * sizeof(int32_t)));
@@ -4142,29 +2382,33 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	if ((fd = fopen(argv[2], "w")) == NULL) {
-		printf("Failed to open destination file \"%s\".\n", argv[2]);
+	if ((fd = fopen(afile, "w")) == NULL) {
+		printf("Failed to open destination file \"%s\".\n", afile);
 		return -2;
 	}
 	fwrite(buffer, bufferlen, 1, fd);
 	fclose(fd);
 	
-	printf("Wrote %u bytes of IR assembly to \"%s\".\n", bufferlen, argv[2]);
+	printf("Wrote %u bytes of IR assembly to \"%s\".\n", bufferlen, afile);
 
 	if (argc >= 4) {
+		char *atype = "eZ80";
 		if ((out = outstart = _malloc(OUTPUT_BUFFER_SIZE)) == NULL) {
 			printf("Failed to malloc %u bytes of space for output buffer\n", OUTPUT_BUFFER_SIZE);
 			return 1;
 		}
 		assemble();
 		postassemble();
-		if ((fd = fopen(argv[3], "wb")) == NULL) {
-			printf("Failed to open destination file \"%s\"\n", argv[3]);
+		if ((fd = fopen(bfile, "wb")) == NULL) {
+			printf("Failed to open destination file \"%s\"\n", bfile);
 			return -2;
 		}
 		fwrite(outstart, out-outstart, 1, fd);
 		fclose(fd);
-		printf("Wrote %lld bytes of eZ80 assembly to \"%s\"\n", out-outstart, argv[3]);
+		if (outformat == FMT_BXS2307) {
+			atype = "BxS2307";
+		}
+		printf("Wrote %lld bytes of %s assembly to \"%s\"\n", out-outstart, atype, bfile);
 	}
 #else
 #define OUT_BUFFER_LOC 0xD52C00

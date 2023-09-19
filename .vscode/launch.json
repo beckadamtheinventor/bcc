@@ -9,7 +9,7 @@
             "request": "launch",
             "name": "Debug u64.c",
             "program": "${workspaceFolder}/bcc.exe",
-            "args": ["examples/u64/u64.c", "examples/u64/u64.asm", "examples/u64/u64.bin"],
+            "args": ["examples/u64/u64.c", "-a", "examples/u64/u64.asm", "-o", "examples/u64/u64.bin", "-f", "CE"],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -17,7 +17,7 @@
             "request": "launch",
             "name": "Debug fib.c",
             "program": "${workspaceFolder}/bcc.exe",
-            "args": ["examples/fib/fib.c", "examples/fib/fib.asm", "examples/fib/fib.bin"],
+            "args": ["examples/fib/fib.c", "-a", "examples/fib/fib.asm", "-o", "examples/fib/fib.bin", "-f", "CE"],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -25,7 +25,7 @@
             "request": "launch",
             "name": "Debug hello.c",
             "program": "${workspaceFolder}/bcc.exe",
-            "args": ["examples/hello/hello.c", "examples/hello/hello.asm", "examples/hello/hello.bin"],
+            "args": ["examples/hello/hello.c", "-a", "examples/hello/hello.asm", "-o", "examples/hello/hello.bin", "-f", "CE"],
             "cwd": "${workspaceFolder}"
         }
     ]
