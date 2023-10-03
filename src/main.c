@@ -92,6 +92,7 @@ enum {
 	SYM_DEFINE = 1,
 	SYM_CONSTANT,
 	SYM_FUNCTION,
+	SYM_CONST_FUNCTION,
 	SYM_EXPR,
 	SYM_VAR,
 	SYM_MASK = 0x1F,
@@ -234,6 +235,7 @@ enum {
 	FMT_BOS,
 #ifdef PLATFORM_DESKTOP
 	FMT_BXS2307,
+	FMT_BXS2320,
 #endif
 };
 
@@ -246,8 +248,13 @@ enum {
 typedef struct _symbol {
 	uint8_t symtype, valtype;
 	unsigned int datalen;
+#ifdef PLATFORM_DESKTOP
+	long long value;
+	long long resolved_value;
+#else
 	uint32_t value;
 	uint32_t resolved_value;
+#endif
 	uint8_t *functionargs;
 	struct _symbol *members;
 	struct _symbol *prev, *next;
@@ -303,7 +310,7 @@ uint32_t tkval;
 _ptr *resolvestack, *resolvestackstart, *expr, *exprstart, *data_start, *data_resolve_stack;
 _int data_resolve_sp = 0;
 uint8_t *out, *outstart;
-unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr, PROGRAM_ORIGIN;
+unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr, PROGRAM_ORIGIN = 0;
 symbol *symtable = NULL;
 symbol **localsymstack = NULL;
 
@@ -418,7 +425,12 @@ uint16_t compute_hash(const char *data, unsigned int len) {
 #endif
 
 
-symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t valtype, int value) {
+#ifdef PLATFORM_DESKTOP
+symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t valtype, long long value)
+#else
+symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t valtype, int value)
+#endif
+{
 	symbol *sym;
 	if (namelen == 0) {
 		namelen = strlen(name);
@@ -443,9 +455,19 @@ symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t
 	sym->hash = compute_hash(name, namelen);
 	sym->next = NULL;
 #ifdef DEBUG
-	printf("Added symbol \"%s\" symtype %X valtype %X value %X hash %X\n", (char*)&sym->name, symtype, valtype, value, sym->hash);
+	printf("Added symbol \"%s\" symtype %X valtype %X value %llX hash %X\n", (char*)&sym->name, symtype, valtype, value, sym->hash);
 #endif
-	symtable = sym;
+	return sym;
+}
+
+symbol *add_sym_function(const char *name, unsigned int namelen, uint8_t symtype, uint8_t valtype, char *value, uint8_t args[]) {
+	symbol *sym = add_sym(name, namelen, symtype, valtype, value);
+	sym->functionargs = _malloc(args[0] + 1);
+	memcpy(sym->functionargs, args, args[0] + 1);
+	sym->resolved_value = value;
+#ifdef DEBUG
+	printf("Symbol is function value named \"%s\".\n", (char*)sym->resolved_value);
+#endif
 	return sym;
 }
 
@@ -458,13 +480,9 @@ symbol *make_anon_sym(unsigned int val, uint8_t valtype) {
 	sym->value = val;
 	sym->valtype = valtype;
 	if ((*localsymstack) != NULL) {
-		if ((*localsymstack)->next != NULL) {
-			(*localsymstack)->next->prev = sym;
-			sym->next = (*localsymstack)->next;
-		}
-		(*localsymstack)->next = sym;
-		sym->prev = (*localsymstack);
-		(*localsymstack) = sym;
+		sym->prev = (*localsymstack)->prev;
+		sym->next = (*localsymstack);
+		(*localsymstack)->prev = sym;
 	} else if (symtable != NULL) {
 		symtable->next = sym;
 		sym->prev = symtable;
@@ -497,7 +515,8 @@ void save_sym_stack(void) {
 // free sym stack from current down to saved point, pop symbol save stack
 void free_local_symbols(void) {
 	symbol *sym = symtable;
-	symbol *tmp = *localsymstack--;
+	symbol *tmp = *localsymstack;
+	*localsymstack-- = NULL;
 	if (tmp != NULL) {
 		do {
 			// break if we've reached the saved point in the symbol stack
@@ -519,7 +538,7 @@ void free_local_symbols(void) {
 // search for a symbol in the symbol table, returning NULL if not found.
 symbol *find_sym(const char *name, unsigned int namelen) {
 	uint16_t hash = compute_hash(name, (namelen>0)?namelen:strlen(name));
-	symbol *sym = symtable;
+	symbol *sym;
 #ifdef DEBUG
 	if (namelen > 0) {
 		char *symname = _malloc(namelen+1);
@@ -534,11 +553,14 @@ symbol *find_sym(const char *name, unsigned int namelen) {
 		namelen = strlen(name);
 	}
 #endif
-	if (sym != NULL) {
+	if (symtable != NULL) {
+		sym = symtable;
 		do {
+			// printf("Checking symbol at %llX\n", (long long)sym);
 			// printf("Checking symbol \"%s\" with hash 0x%X at 0x%llX\n", (char*)&sym->name, sym->hash, (long long int)sym);
 			if (hash == sym->hash) {
-				if (!strncmp(name, &sym->name, namelen)) {
+				if (!strncmp(name, sym->name, namelen)) {
+					// printf("Returning symbol \"%s\" with hash 0x%X at 0x%llX\n", sym->name, sym->hash, (long long int)sym);
 					return sym;
 				}
 			}
@@ -865,6 +887,7 @@ void tk_next(void) {
 #ifdef DEBUG
 	printf("tk = %X \"%c\"\n", tk, tk);
 #endif
+	// printf("tk = \"%c\" 0x%X\n", tk, tk);
 }
 
 void expression(uint8_t level) {
@@ -876,8 +899,8 @@ void expression(uint8_t level) {
 	int tmp;
 	symbol *sym;
 
-//	printf("%u\n", lno);
-//	printf("tk = %X tkval = %X\n", tk, tkval);
+	//printf("%u\n", lno);
+	//printf("tk = %X tkval = %X\n", tk, tkval);
 	if (!tk) {
 		error("Unexpected EOF");
 	} else if (tk == TK_NUM || tk == TK_STR || tk == TK_DATA || tk == TK_CHAR) {
@@ -971,7 +994,7 @@ void expression(uint8_t level) {
 			// function call
 			tmp = 0;
 			argno = 0;
-			if ((sym->symtype & SYM_MASK) != SYM_FUNCTION) {
+			if ((sym->symtype & SYM_MASK) != SYM_FUNCTION && (sym->symtype & SYM_MASK) != SYM_CONST_FUNCTION) {
 				error("can't call non-function value as function");
 			}
 			tk_next();
@@ -984,7 +1007,7 @@ void expression(uint8_t level) {
 					function_argument_stack_sp++;
 					function_argument_stack[function_argument_stack_sp].expr = expr;
 					expression(TK_ASSIGN);
-					if (argno > sym->functionargs[0]) {
+					if (sym->functionargs == NULL && argno > 0 || argno > sym->functionargs[0]) {
 						error("Too many arguments for function");
 					}
 					if (tkisconst) {
@@ -1029,7 +1052,7 @@ void expression(uint8_t level) {
 			} else {
 				while (tk != ')') {
 					expression(TK_ASSIGN);
-					if (argno > sym->functionargs[0]) {
+					if (sym->functionargs == NULL && argno > 0 || argno > sym->functionargs[0]) {
 						error("Too many arguments for function");
 					}
 					if (tkisconst) {
@@ -1057,7 +1080,7 @@ void expression(uint8_t level) {
 					argno++;
 				}
 			}
-			if (argno < sym->functionargs[0]) {
+			if (sym->functionargs == NULL && argno > 0 || argno > sym->functionargs[0]) {
 				error("Too many arguments for function");
 			}
 			tk_next();
@@ -1113,18 +1136,20 @@ void expression(uint8_t level) {
 			}
 			if (primarytype == T_PTR) {
 				error("Cannot index pointer to void");
-			} else if (primarytype < T_PTR) {
+			} else if (primarytype < T_PTR && primarytype != T_STR && !(primarytype & T_INLINE_DATA)) {
 				error("Pointer type expected");
 			} else {
 				if (tkisconst && primaryisconst) { // constant[constant]
 					expr = d; // rewind emitted data for constant expression
-					tkval = primary + tkval * (tkvaltype & T_MASK);
-				} else if (primaryisconst) { // constant[var]
-					*++expr = IR_MUL_CONST;
-					if ((tkvaltype & T_MASK) >= T_TYPEDEF) {
-						*++expr = 1;
+					if ((primarytype & T_MASK) >= T_TYPEDEF) {
+						tkval = primary + tkval;
 					} else {
-						*++expr = tkvaltype & T_MASK;
+						tkval = primary + tkval * (primarytype & T_MASK);
+					}
+				} else if (primaryisconst) { // constant[var]
+					if ((primarytype & T_MASK) < T_TYPEDEF) {
+						*++expr = IR_MUL_CONST;
+						*++expr = primarytype & T_MASK;
 					}
 					*++expr = IR_ADD_CONST;
 					*++expr = primary; // primary is not destroyed if the expression is not constant
@@ -1132,14 +1157,17 @@ void expression(uint8_t level) {
 				} else if (tkisconst) { // var[constant]
 					expr = d;
 					*++expr = IR_ADD_CONST;
-					*++expr = tkval * (tkvaltype & T_MASK);
-					tkisconst = false;
-				} else if ((primarytype & T_MASK) > 1 && (primarytype & T_MASK) < T_TYPEDEF) {
-					*++expr = IR_MUL_CONST;
-					*++expr = primarytype & T_MASK;
-					*++expr = IR_ADD;
+					if ((primarytype & T_MASK) >= T_TYPEDEF) {
+						*++expr = tkval;
+					} else {
+						*++expr = tkval * (primarytype & T_MASK);
+					}
 					tkisconst = false;
 				} else {
+					if ((primarytype & T_MASK) < T_TYPEDEF) {
+						*++expr = IR_MUL_CONST;
+						*++expr = primarytype & T_MASK;
+					}
 					*++expr = IR_POP_SEC;
 					*++expr = IR_ADD;
 					tkisconst = false;
@@ -1529,7 +1557,8 @@ void compile(void);
 
 int statement(int stackdepth) {
 	_ptr *a, *b;
-	if (tksym != NULL && tksym->valtype == T_TYPEDEF) {
+	// printf("tk=0x%X\n", tk);
+	if (tk == TK_ID && tksym != NULL && tksym->valtype == T_TYPEDEF) {
 		symbol *sym;
 		uint8_t bt = tksym->value;
 		tk_next();
@@ -1638,6 +1667,7 @@ int statement(int stackdepth) {
 							}
 						}
 					} while (tk != '}');
+					tk_next();
 				} else {
 					error("Invalid local initializer");
 				}
@@ -1730,6 +1760,7 @@ int statement(int stackdepth) {
 		*++expr = make_anon_sym(a - exprstart, T_PTR);
 	} else if (tk == TK_RETURN) {
 		tk_next();
+		// printf("Parsing return statement\n");
 		if (tk != ';') {
 			expression(TK_ASSIGN);
 		}
@@ -1820,6 +1851,44 @@ void precompile(void) {
 		add_sym("int8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
 		add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
 		add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+	} else if (outformat == FMT_BXS2320) {
+		add_sym("bool", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
+		add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
+		add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym("char", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+		add_sym("short", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("int", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym("long", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym("uint8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+		add_sym("uint16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("uint32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym("int8_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_CHAR);
+		add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
+		add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
+		add_sym_function("memcpy", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_memcpy", (uint8_t[]){3, T_PTR+T_VOID, T_PTR+T_VOID, T_LONG});
+		add_sym_function("rmemcpy", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_rmemcpy", (uint8_t[]){3, T_PTR+T_VOID, T_PTR+T_VOID, T_LONG});
+		add_sym_function("strlen", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_INT, "_strlen", (uint8_t[]){1, T_PTR+T_CHAR});
+		add_sym_function("strcpy", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_strcpy", (uint8_t[]){2, T_PTR+T_CHAR, T_PTR+T_CHAR});
+		add_sym_function("strncpy", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_strncpy", (uint8_t[]){3, T_PTR+T_CHAR, T_PTR+T_CHAR, T_LONG});
+		add_sym_function("memcmp", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_INT, "_memcmp", (uint8_t[]){3, T_PTR+T_VOID, T_PTR+T_VOID, T_LONG});
+		add_sym_function("strcmp", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_INT, "_strcmp", (uint8_t[]){2, T_PTR+T_CHAR, T_PTR+T_CHAR});
+		add_sym_function("strncmp", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_INT, "_strncmp", (uint8_t[]){3, T_PTR+T_CHAR, T_PTR+T_CHAR, T_LONG});
+		add_sym_function("memset", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_memset", (uint8_t[]){3, T_PTR+T_VOID, T_WORD, T_LONG});
+		add_sym_function("memcpy_repeat", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_memcpy_repeat", (uint8_t[]){4, T_PTR+T_VOID, T_WORD, T_LONG, T_LONG});
+		add_sym_function("inittty", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_inittty", (uint8_t[]){0});
+		add_sym_function("cleartty", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_cleartty", (uint8_t[]){0});
+		add_sym_function("print", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_print", (uint8_t[]){2, T_PTR+T_CHAR, T_WORD});
+		add_sym_function("printchar", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printchar", (uint8_t[]){2, T_CHAR, T_WORD});
+		add_sym_function("printcharat", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printcharat", (uint8_t[]){3, T_CHAR, T_WORD, T_WORD});
+		add_sym_function("printline", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printline", (uint8_t[]){2, T_PTR+T_CHAR, T_WORD});
+		add_sym_function("printint", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printint", (uint8_t[]){2, T_LONG, T_WORD});
+		add_sym_function("printuint", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printuint", (uint8_t[]){2, T_LONG, T_WORD});
+		add_sym_function("nextcol", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_nextcol", (uint8_t[]){0});
+		add_sym_function("newline", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_newline", (uint8_t[]){0});
+		add_sym_function("getkey", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_CHAR, "_getkey", (uint8_t[]){0});
+		add_sym_function("waitkey", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_CHAR, "_waitkey", (uint8_t[]){0});
+		add_sym_function("waitkeycycle", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_CHAR, "_waitkeycycle", (uint8_t[]){0});
+		add_sym_function("verticalmenu", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_WORD, "_menu", (uint8_t[]){1, T_PTR+T_VOID});
 	}
 #endif
 }
@@ -2004,8 +2073,8 @@ void compile(void) {
 			if (tksym != NULL) {
 				error("Duplicate global declaration");
 			}
+			sym = add_sym(tkname, tknamelen, SYM_GLOBAL, ty, 0);
 			tk_next();
-			sym = add_sym(tkname, tknamelen, 0, ty, 0);
 			// printf("tk = %X \"%c\"\n", tk, tk);
 			if (tk == '[') {
 				tk_next();
@@ -2021,6 +2090,11 @@ void compile(void) {
 					error("Invalid global declaration");
 				}
 				sym->valtype |= T_INLINE_DATA;
+				tk_next();
+				if (tk != ']') {
+					error("Missing closing bracket");
+				}
+				tk_next();
 			} else if (tk == '(') { // function declaration
 				save_sym_stack();
 				sym->symtype = SYM_FUNCTION;
@@ -2035,27 +2109,29 @@ void compile(void) {
 				stackdepth = nargs = 0;
 				argdepth = 6;
 				while (tk != ')') {
+					// printf("Parsing function parameter\n");
 					ty = T_INT;
-					if (tkvaltype == T_TYPEDEF) {
-						ty = tkval;
+					if (tk == TK_ID && tksym != NULL && tksym->valtype == T_TYPEDEF) {
+						ty = tksym->value;
 						tk_next();
 					}
 					while (tk == TK_MUL) {
 						tk_next();
 						ty += T_PTR;
 					}
+					if (ty == T_VOID && argdepth == 6 && tk == ')') {
+						break;
+					}
+					// printf("parsed parameter with type 0x%X\n", ty);
 					if (tk != TK_ID) {
-						if (ty == T_VOID && argdepth == 6 && tk == ')') {
-							break;
-						}
 						error("Invalid parameter declaration");
 					}
-					if (tksym != NULL && tksym->symtype & SYM_LOCAL) {
+					if (tksym != NULL && (tksym->symtype & SYM_LOCAL)) {
+						// printf("Parameter name: \"%s\"\n", tksym->name);
 						error("Duplicate parameter declaration");
 					}
-					// printf("added local symbol with type 0x%X\n", ty);
 					add_sym(tkname, tknamelen, SYM_LOCAL, ty, argdepth);
-
+					// printf("added local symbol with type 0x%X name \"%s\"\n", ty, tksym->name);
 					sym->functionargs[++nargs] = ty;
 					if ((ty & T_MASK) == T_LONG) {
 						argdepth += 6;
@@ -2070,6 +2146,7 @@ void compile(void) {
 						}
 					}
 				}
+				// printf("Parsed %u function parameters\n", nargs);
 				sym->functionargs[0] = nargs;
 				*++expr = nargs;
 				tk_next();
@@ -2090,8 +2167,9 @@ void compile(void) {
 						}
 						goto nexttoken;
 					} else if (tk != ';') {
-						error("Missing open brace in function declaration");
+						error("Missing semicolon following function prototype");
 					}
+					goto nexttoken;
 				} else {
 					tk_next();
 					// printf("Function start\n");
@@ -2103,15 +2181,20 @@ void compile(void) {
 						// printf("Reading function statement\n");
 						stackdepth = statement(stackdepth);
 					}
+					// printf("Function end\n");
 					*stackdepthloc = stackdepth;
 					if (*expr != IR_EXIT && *expr != IR_LEAVE) {
 						*++expr = IR_LEAVE;
 					}
 				}
 				free_local_symbols();
+				// printf("Freed locals\n");
+				goto nexttoken;
 			} else {
 				sym->value = globaladdr;
-				if ((ty & T_MASK) > 0) {
+				if (ty & T_INLINE_DATA) {
+					globaladdr += sym->datalen;
+				} else if ((ty & T_MASK) > 0) {
 					globaladdr += (ty & T_MASK);
 				} else if (ty >= T_PTR) {
 					globaladdr += 3;
@@ -2119,10 +2202,102 @@ void compile(void) {
 					error("Invalid global declaration");
 				}
 			}
+			if (tk == TK_ASSIGN) {
+				tk_next();
+				// printf("tk=0x%X\"%c\"\n", tk, tk);
+				if (tk == TK_NUM) {
+					if (sym->valtype & T_INLINE_DATA) {
+						error("Invalid global initializer for inline data global");
+					}
+					if ((sym->valtype & T_MASK) == T_LONG) {
+						*++expr = IR_IMM_32;
+						*++expr = tkval;
+						*++expr = tkval >> 24;
+					} else {
+						*++expr = IR_IMM;
+						*++expr = tkval;
+					}
+					*++expr = IR_STORE_GLOBAL;
+					*++expr = signext(sym->value);
+					*++expr = sym->valtype & T_MASK;
+					tk_next();
+				} else if (tk == TK_STR) {
+					*++expr = IR_IMM_PROG_OFFSET;
+					*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+					if (sym->valtype & T_INLINE_DATA) {
+						*++expr = IR_EX_SEC_PRI;
+						*++expr = IR_LEA_GLOBAL;
+						*++expr = signext(sym->value);
+						*++expr = IR_STRCPY;
+					} else if ((sym->valtype & T_MASK) == T_STR) {
+						*++expr = IR_STORE_GLOBAL;
+						*++expr = signext(sym->value);
+						*++expr = sym->valtype & T_MASK;
+					} else {
+						error("Invalid local type for string initializer");
+					}
+					tk_next();
+				} else if (tk == '{') {
+					unsigned int counter = 0;
+					tk_next();
+					do {
+						if (tk == TK_NUM) {
+							if ((sym->valtype & T_MASK) == T_LONG) {
+								*++expr = IR_IMM_32;
+								*++expr = tkval;
+								*++expr = tkval >> 24;
+							} else {
+								*++expr = IR_IMM;
+								*++expr = tkval;
+							}
+							*++expr = sym->value;
+							*++expr = sym->valtype & T_MASK;
+						} else if (tk == TK_STR) {
+							if ((sym->valtype & T_MASK) == T_LONG) {
+								error("Invalid type for global string array initializer");
+							}
+							*++expr = IR_IMM_PROG_OFFSET;
+							*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
+						} else {
+							error("Invalid value in global initializer array");
+						}
+						counter++;
+						tk_next();
+						if (tk == ',') {
+							tk_next();
+							if (tk == '}') {
+								error("Expected value following comma in global initializer array");
+							}
+						}
+					} while (tk != '}');
+				} else {
+					error("Invalid global initializer");
+				}
+			}
 		}
 	nexttoken:;
 		tk_next();
 	}
+}
+
+void try_resolve_symbols_generic(unsigned int offset) {
+	symbol *sym;
+	if ((sym = symtable) == NULL) {
+		return;
+	}
+	do {
+		//if (!(sym->symtype & SYM_RESOLVED)) {
+		//	printf("\"%s\" value %X\nCurrent offset %X\n", (char*)&sym->name, sym->value, offset);
+		//}
+		// if (sym->symtype & SYM_RESOLVED) {
+		//	printf("  resolved to: %X\n", sym->resolved_value);
+		// } else {
+		//	printf("  not yet resolved\n");
+		// }
+		if (sym->value == offset) {
+			out += sprintf(out, "label s_%llu\n", (_ptr)sym);
+		}
+	} while ((sym = sym->prev));
 }
 
 void postassemble(void) {
@@ -2138,8 +2313,8 @@ void postassemble(void) {
 		// } else {
 		//	printf("  not yet resolved\n");
 		// }
-		if (sym->value >= (data_start - exprstart)) {
-			if (!(sym->symtype & SYM_RESOLVED)) {
+		if (!(sym->symtype & SYM_RESOLVED)) {
+			if (sym->value >= (data_start - exprstart)) {
 				sym->symtype |= SYM_RESOLVED;
 				//printf("Symbol %s value %X\n", (char*)&sym->name, sym->value);
 				sym->resolved_value = PROGRAM_ORIGIN + (out - outstart) + sym->value - (data_start - exprstart);
@@ -2148,34 +2323,51 @@ void postassemble(void) {
 		sym = sym->prev;
 	}
 
-	while (sp > resolvestackstart) {
-		unsigned int offset = *--sp;
-		sym = *--sp;
-		if (sym == NULL) {
-			memcpy(&outstart[offset], &exitroutineptr, 3);
-		} else {
-			if (sym->symtype & SYM_RESOLVED) {
-#ifdef DEBUG
-				printf("resolving symbol \"%s\" use at offset 0x%X with value 0x%X\n", (char*)&sym->name, offset, sym->resolved_value);
+#ifdef PLATFORM_DESKTOP
+	if (outformat == FMT_BOS || outformat == FMT_CE) {
 #endif
-				memcpy(&outstart[offset], &sym->resolved_value, 3);
-			} else if (sym->value >= (data_start - exprstart)) {
-				unsigned int tmpval = PROGRAM_ORIGIN + (out - outstart) + sym->value - (data_start - exprstart);
-				memcpy(&outstart[offset], &tmpval, 3);
+		while (sp > resolvestackstart) {
+			unsigned int offset = *--sp;
+			sym = *--sp;
+			if (sym == NULL) {
+				memcpy(&outstart[offset], &exitroutineptr, 3);
 			} else {
-				//printf("Symbol name: \"%s\"\n", (char*)&sym->name);
-				//printf("Symbol value: %u\n", sym->value);
-				//printf("Symbol type: 0x%X\n", sym->valtype);
-				//printf("Output offset: %u\n", offset);
-				//printf("data_start-exprstart = %llu\n", data_start - exprstart);
-				error("Internal: Failed to resolve symbol in assembly step");
+				if (sym->symtype & SYM_RESOLVED) {
+#ifdef DEBUG
+					printf("resolving symbol \"%s\" use at offset 0x%X with value 0x%X\n", (char*)&sym->name, offset, sym->resolved_value);
+#endif
+					memcpy(&outstart[offset], &sym->resolved_value, 3);
+				} else if (sym->value >= (data_start - exprstart)) {
+					unsigned int tmpval = PROGRAM_ORIGIN + (out - outstart) + sym->value - (data_start - exprstart);
+					memcpy(&outstart[offset], &tmpval, 3);
+				} else {
+					//printf("Symbol name: \"%s\"\n", (char*)&sym->name);
+					//printf("Symbol value: %u\n", sym->value);
+					//printf("Symbol type: 0x%X\n", sym->valtype);
+					//printf("Output offset: %u\n", offset);
+					//printf("data_start-exprstart = %llu\n", data_start - exprstart);
+					error("Internal: Failed to resolve symbol in assembly step");
+				}
 			}
 		}
+#ifdef PLATFORM_DESKTOP
 	}
+#endif
 	if (expr > data_start) {
-		for (unsigned int i = 0; i < expr-data_start; i++) {
-			*out++ = data_start[i];
+#ifdef PLATFORM_DESKTOP
+		if (outformat == FMT_BOS || outformat == FMT_CE) {
+#endif
+			for (unsigned int i = 0; i < expr-data_start; i++) {
+				*out++ = data_start[i];
+			}
+#ifdef PLATFORM_DESKTOP
+		} else {
+			for (unsigned int i = 0; i < expr-data_start; i++) {
+				try_resolve_symbols_generic(&data_start[i] - exprstart);
+				out += sprintf(out, "dw $%llX\n", data_start[i]);
+			}
 		}
+#endif
 	}
 }
 
@@ -2206,12 +2398,15 @@ void try_resolve_symbols(unsigned int offset) {
 
 #ifdef PLATFORM_DESKTOP
 #include "platform/BxS2307gen.h"
+#include "platform/BxS2320gen.h"
 
 void assemble(void) {
 	if (outformat == FMT_BOS || outformat == FMT_CE) {
 		assemble_eZ80();
 	} else if (outformat == FMT_BXS2307) {
 		assemble_BxS2307();
+	} else if (outformat == FMT_BXS2320) {
+		assemble_BxS2320();
 	}
 }
 #else
@@ -2226,7 +2421,7 @@ int main(int argc, char **argv) {
 	char *buffer, *afile = "a.asm", *bfile = "a.out";
 	_ptr oldopcode;
 	if (argc < 2) {
-		printf("Usage: %s src [-o bin] [-f [BOS|CE|BxS2307]]\n", argv[0]);
+		printf("Usage: %s src [-o bin] [-f [BOS|CE|BxS2307|BxS2320]]\n", argv[0]);
 		return 0;
 	}
 	if ((fd = fopen(argv[1], "r")) == NULL) {
@@ -2265,6 +2460,8 @@ int main(int argc, char **argv) {
 					outformat = FMT_CE;
 				} else if (!strcmp(argv[i], "BxS2307")) {
 					outformat = FMT_BXS2307;
+				} else if (!strcmp(argv[i], "BxS2320")) {
+					outformat = FMT_BXS2320;
 				} else {
 					printf("Unknown output format specifier \"%s\"\n", argv[i]);
 					return 0;
@@ -2276,7 +2473,7 @@ int main(int argc, char **argv) {
 	}
 
 	if ((expr = exprstart = _malloc(IR_OUTPUT_SIZE * sizeof(_ptr))) == NULL) {
-		printf("Failed to malloc %u bytes of space for IR output.\n", (unsigned int)(IR_OUTPUT_SIZE * sizeof(int32_t)));
+		printf("Failed to malloc %u bytes of space for IR output.\n", (unsigned int)(IR_OUTPUT_SIZE * sizeof(_ptr)));
 		return 1;
 	}
 	srcoffset = 0;
@@ -2286,10 +2483,10 @@ int main(int argc, char **argv) {
 	postcompile();
 	exprlen = data_start - exprstart;
 	datalen = expr - data_start;
-	printf("Compiled %u bytes of IR.\n", (unsigned int)(exprlen*sizeof(_int)));
+	printf("Compiled %u bytes of IR.\n", (unsigned int)(exprlen*sizeof(_ptr)));
 
 	if ((buffer = _malloc(exprlen * 32 + datalen * 4)) == NULL) {
-		printf("Failed to malloc %u bytes of space for file output buffer.\n", exprlen * 40);
+		printf("Failed to malloc %u bytes of space for file output buffer.\n", exprlen * 32 + datalen * 4);
 		return 1;
 	}
 	bufferlen = 0;
@@ -2302,7 +2499,7 @@ int main(int argc, char **argv) {
 		if (opcode >= 0 && opcode < IR_INVALID_OPCODE) {
 			int8_t nargs = IR_ARGS[opcode];
 #ifdef DEBUG
-			printf("%u: %u %d %s\n", i, opcode, nargs, IR_STRINGS[opcode]);
+			printf("%u: %llu %d %s\n", i, opcode, nargs, IR_STRINGS[opcode]);
 			if (nargs >= 1) {
 				printf(" arg0: %lld 0x%llX\n", exprstart[i+1], exprstart[i+1]);
 			}
@@ -2324,15 +2521,17 @@ int main(int argc, char **argv) {
 				buffer[bufferlen++] = ' ';
 				if (opcode == IR_DEFINE_FUNCTION || opcode == IR_CALL || opcode == IR_JMP || opcode == IR_BZ || opcode == IR_BNZ || opcode == IR_IMM_PROG_OFFSET) {
 					symbol *tmpsym = exprstart[i+1];
-					if (tmpsym->symtype & SYM_RESOLVED) {
-						bufferlen += sprintf(&buffer[bufferlen], "\"%s\", $%X, ", (char*)&tmpsym->name, tmpsym->resolved_value);
+					if ((tmpsym->symtype & SYM_MASK) == SYM_CONST_FUNCTION) {
+						bufferlen += sprintf(&buffer[bufferlen], "\"%s\", ", (char*)tmpsym->resolved_value);
 					} else if (tmpsym->name[0] == 0) {
-						bufferlen += sprintf(&buffer[bufferlen], "$%X, ", tmpsym->value);
+						bufferlen += sprintf(&buffer[bufferlen], "$%llX, ", tmpsym->value);
+					} else if (tmpsym->symtype & SYM_RESOLVED) {
+						bufferlen += sprintf(&buffer[bufferlen], "\"%s\", $%llX, ", tmpsym->name, tmpsym->resolved_value);
 					} else {
-						bufferlen += sprintf(&buffer[bufferlen], "\"%s\", ", (char*)&tmpsym->name);
+						bufferlen += sprintf(&buffer[bufferlen], "\"%s\", ", tmpsym->name);
 					}
 					if (opcode == IR_DEFINE_FUNCTION) {
-						bufferlen += sprintf(&buffer[bufferlen], "$%X, ", tmpsym->value);
+						bufferlen += sprintf(&buffer[bufferlen], "$%llX, ", tmpsym->value);
 					}
 				}
 				while (nargs > 0) {
@@ -2407,6 +2606,8 @@ int main(int argc, char **argv) {
 		fclose(fd);
 		if (outformat == FMT_BXS2307) {
 			atype = "BxS2307";
+		} else if (outformat == FMT_BXS2320) {
+			atype = "BxS2320";
 		}
 		printf("Wrote %lld bytes of %s assembly to \"%s\"\n", out-outstart, atype, bfile);
 	}

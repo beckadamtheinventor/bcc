@@ -1,7 +1,5 @@
 
-#define EMITL(s) out += sprintf(out, s)
-#define EMITL2(s, a) out += sprintf(out, s, a)
-#define EMITL3(s, a, b) out += sprintf(out, s, a, b)
+#include "include/emitf.h"
 
 void try_resolve_symbols_BxS2307(unsigned int offset) {
 	symbol *sym = symtable;
@@ -63,6 +61,7 @@ void assemble_BxS2307(void) {
 	uint8_t rnop = 9, rnop2 = 10, rnos = 11, rnos2 = 12, rarg = 16;
 	symbol *sym, *mainsym;
 
+	PROGRAM_ORIGIN = 0;
 	lno = 0;
 
 	if ((mainsym = find_sym("main", 0)) == NULL) {

@@ -2,9 +2,9 @@
 #include "include/ez80.h"
 #include "include/ti84pceg.h"
 
-#define LOAD_HL(a) if ((unsigned)(a) == 0) {EMIT_OR_A(out); EMIT_SBC_HL_HL(out);} else if ((unsigned)(a) == -1) {EMIT_SCF(out); EMIT_SBC_HL_HL(out);} else if (!(hlisconst && hlvalue == (unsigned)(a))) { EMIT_LD_HL_IMM(out, (unsigned)(a)); } hlvalue = (a); hlisconst = true;
-#define LOAD_DE(a) if (!(deisconst && devalue == (unsigned)(a))) {EMIT_LD_DE_IMM(out, (unsigned)(a));} devalue = (a); deisconst = true;
-#define LOAD_BC(a) if (!(bcisconst && bcvalue == (unsigned)(a))) {EMIT_LD_BC_IMM(out, (unsigned)(a));} bcvalue = (a); bcisconst = true;
+#define LOAD_HL(a) if (!(hlisconst && hlvalue == (unsigned)(a))) { if ((unsigned)(a) == 0) {EMIT_OR_A(out); EMIT_SBC_HL_HL(out);} else if ((unsigned)(a) == -1) {EMIT_SCF(out); EMIT_SBC_HL_HL(out);} else {EMIT_LD_HL_IMM(out, (unsigned)(a));} hlvalue = (a); hlisconst = true; }
+#define LOAD_DE(a) if (!(deisconst && devalue == (unsigned)(a))) {EMIT_LD_DE_IMM(out, (unsigned)(a)); devalue = (a); deisconst = true;}
+#define LOAD_BC(a) if (!(bcisconst && bcvalue == (unsigned)(a))) {EMIT_LD_BC_IMM(out, (unsigned)(a)); bcvalue = (a); bcisconst = true;}
 
 
 uint8_t convert_flag_to_char(uint8_t bt) {
@@ -482,9 +482,8 @@ void assemble_eZ80(void) {
 					deisconst = false;
 				} else {
 					expr--;
-					EMIT_LD_HL_IMM(out, (unsigned)arg);
+					LOAD_HL(arg);
 					bt = T_PTR;
-					hlisconst = false;
 				}
 				break;
 			case IR_STORE_LOCAL:

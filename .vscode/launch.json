@@ -4,6 +4,8 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+
+
         {
             "type": "lldb",
             "request": "launch",
@@ -25,7 +27,15 @@
             "request": "launch",
             "name": "Debug hello.c",
             "program": "${workspaceFolder}/bcc.exe",
-            "args": ["examples/hello/hello.c", "-a", "examples/hello/hello.asm", "-o", "examples/hello/hello.bin", "-f", "CE"],
+            "args": ["examples/hello_world/hello.c", "-a", "examples/hello_world/hello.asm", "-o", "examples/hello_world/hello.bin", "-f", "CE"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug fib2320.c",
+            "program": "${workspaceFolder}/bcc.exe",
+            "args": ["examples/fib/fib2320.c", "-a", "examples/fib/fib2320.ir.asm", "-o", "examples/fib/fib2320.asm", "-f", "BxS2320"],
             "cwd": "${workspaceFolder}"
         }
     ]
