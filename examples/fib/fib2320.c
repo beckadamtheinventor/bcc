@@ -1,9 +1,11 @@
 
 
-long fib(uint16_t iterations) {
+long fib(long iterations) {
 	long na, nb, nc;
 	na = nb = 1;
-	iterations--;
+	if (iterations < 2) {
+		return na;
+	}
 	while (iterations--) {
 		nc = na;
 		na = na + nb;
@@ -13,18 +15,23 @@ long fib(uint16_t iterations) {
 }
 
 int main() {
-	cleartty();
-    print("fib(20)=");
-    printuint(fib(20));
-    newline();
-    print("fib(30)=");
-    printuint(fib(30));
-    newline();
-    print("fib(40)=");
-    printuint(fib(40));
-    newline();
-    print("fib(50)=");
-    printuint(fib(50));
-    newline();
-    waitkeycycle();
+	char key = 0;
+	long num = 1;
+	while (key != sk_b) {
+		cleartty();
+		print("fib(", 0x7fff);
+		printuint(num);
+		printline(")=");
+		printuint(fib(num));
+		key = waitkeycycle();
+		if (key == sk_up) {
+			num++;
+		} else if (key == sk_down && num > 1) {
+			num--;
+		} else if (key == sk_right) {
+			num = num + 16;
+		} else if (key == sk_left) {
+			num = num - 16;
+		}
+	}
 }

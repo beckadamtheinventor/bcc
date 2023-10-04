@@ -153,8 +153,8 @@ enum {
 	IR_LOAD_WORD, // load indirect word (16-bit)
 	IR_LOAD_INT, // load indirect int (24-bit)
 	IR_LOAD_LONG, // load indirect long (32-bit)
-	IR_COMPARE_Z, // compare secondary register == 0, storing the result to the primary register
-	IR_COMPARE_NZ, // compare secondary register != 0, storing the result to the primary register
+	IR_COMPARE_Z, // compare primary register == 0, storing the result to the primary register
+	IR_COMPARE_NZ, // compare primary register != 0, storing the result to the primary register
 
 // <make sure the following tokens are in the same order as their corresponding token values>
 	IR_LOR, // logical OR secondary by primary register, storing to primary
@@ -246,7 +246,7 @@ enum {
 #define FUNCTION_MAX_NUM_ARGS 16
 #define sizeof_symbol(name) (strlen(name)+sizeof(symbol))
 typedef struct _symbol {
-	uint8_t symtype, valtype;
+	uint8_t symtype, valtype, allowfree;
 	unsigned int datalen;
 #ifdef PLATFORM_DESKTOP
 	long long value;
@@ -396,8 +396,8 @@ bool check_token(const char *a) {
 bool consume_token(const char *a) {
 	if (check_token(a)) {
 		char c = srcdata[srcoffset+strlen(a)-1];
-		if (c == ' ' || c == '\t' || c == '\n') {
-			srcoffset += strlen(a);
+		if (!((unsigned)(c&~0x20)-'A' < 26 || (unsigned)c-'0' < 10 || c == '_')) {
+			srcoffset += strlen(a) - 1;
 			return true;
 		}
 	}
@@ -439,6 +439,7 @@ symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t
 	if (sym == NULL) {
 		error("Out of memory");
 	}
+	memset(sym, 0, sizeof(symbol));
 	// link new symbol into linked list of symbols
 	if (symtable != NULL) {
 		symtable->next = sym;
@@ -451,6 +452,7 @@ symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t
 	sym->name[namelen] = 0;
 	sym->symtype = symtype;
 	sym->valtype = valtype;
+	sym->allowfree = 1;
 	sym->value = value;
 	sym->hash = compute_hash(name, namelen);
 	sym->next = NULL;
@@ -472,25 +474,23 @@ symbol *add_sym_function(const char *name, unsigned int namelen, uint8_t symtype
 }
 
 symbol *make_anon_sym(unsigned int val, uint8_t valtype) {
-	symbol *sym;
+	symbol *sym, *tmp;
 	if ((sym = _malloc(sizeof(symbol))) == NULL) {
 		error("Out of memory");
 	}
 	memset(sym, 0, sizeof(symbol));
+	sym->allowfree = 0;
 	sym->value = val;
 	sym->valtype = valtype;
-	if ((*localsymstack) != NULL) {
-		sym->prev = (*localsymstack)->prev;
-		sym->next = (*localsymstack);
-		(*localsymstack)->prev = sym;
-	} else if (symtable != NULL) {
+	if (symtable != NULL) {
 		symtable->next = sym;
-		sym->prev = symtable;
-		symtable = sym;
-	} else {
-		sym->prev = symtable;
-		symtable = sym;
 	}
+	sym->prev = symtable;
+	symtable = sym;
+	sym->next = NULL;
+#ifdef DEBUG
+	printf("Added anon symbol 0x%llX\n", (long long)sym);
+#endif
 	return sym;
 }
 
@@ -508,26 +508,34 @@ symbol *make_anon_sym_str(unsigned int offset, char *str, unsigned int len) {
 
 
 void save_sym_stack(void) {
+	// static size_t num_calls = 1;
+	// printf("save_sym_stack called %lld times\n", num_calls++);
+
 	// push to the symbol save stack
 	*++localsymstack = symtable;
 }
 
 // free sym stack from current down to saved point, pop symbol save stack
 void free_local_symbols(void) {
+	// static size_t num_calls = 1;
 	symbol *sym = symtable;
 	symbol *tmp = *localsymstack;
 	*localsymstack-- = NULL;
+	// printf("free_local_symbols called %lld times\n", num_calls++);
+
 	if (tmp != NULL) {
 		do {
 			// break if we've reached the saved point in the symbol stack
 			if (sym == tmp) {
 				break;
 			}
-#ifdef DEBUG
-			printf("Freeing symbol \"%s\"\n", sym->next->name);
-#endif
 			if (sym->next != NULL) {
-				free(sym->next);
+				if (sym->next->allowfree > 0) {
+#ifdef DEBUG
+					printf("Freeing symbol \"%s\"\n", sym->next->name);
+#endif
+					_free(sym->next);
+				}
 			}
 			sym->next = NULL;
 		} while ((sym = sym->prev) != NULL);
@@ -806,25 +814,28 @@ void tk_next(void) {
 					tkval = readHexByte();
 				} else if ((peekchar()&~0x20) == 'N') {
 					tkval = '\n';
+					srcoffset++;
 				} else if ((peekchar()&~0x20) == 'T') {
 					tkval = '\t';
+					srcoffset++;
 				} else if ((peekchar()&~0x20) == 'R') {
 					tkval = '\r';
+					srcoffset++;
 				} else if (peekchar() == '0') {
 					tkval = '\0';
+					srcoffset++;
 				} else {
 					tkval = getchar();
 				}
 			} else {
 				tkval = getchar();
 			}
-			if (getchar() != tk) {
+			if (getchar() != '\'') {
 				error("Unterminated char literal");
 			}
 			tkvaltype = T_CHAR;
 			tk = TK_CHAR;
 			tkisconst = true;
-			srcoffset--;
 		} else if (tk == '"') {
 			unsigned int i = srcoffset;
 			char *ptr;
@@ -958,27 +969,6 @@ void expression(uint8_t level) {
 			} else {
 				error("sizeof: Invalid/unsupported or non-constant size value/type");
 			}
-		// } else if (tk == TK_ID) {
-			// sym = (symbol*)tkval;
-			// if (sym->valtype == TK_CHAR) {
-				// EMIT_LD_HL_IMM(1);
-			// } else if (sym->valtype == TK_NUM || sym->valtype >= T_PTR) {
-				// EMIT_LD_HL_IMM(3);
-			// } else if (sym->valtype == TK_STR) {
-				// EMIT_LD_HL_IMM(sym->value);
-				// EMIT_INST_8(PUSH_HL);
-				// EMIT_INST_8_24(CALL_IMM, _STRLEN);
-				// EMIT_INST_8(POP_BC);
-			// }
-		// } else if (tk == TK_NUM || tkvaltype >= T_PTR) {
-			// EMIT_LD_HL_IMM(3);
-		// } else if (tk == TK_STR) {
-			// EMIT_LD_HL_IMM(sym->value);
-			// EMIT_INST_8(PUSH_HL);
-			// EMIT_INST_8_24(CALL_IMM, _STRLEN);
-			// EMIT_INST_8(POP_BC);
-		// } else if (tk == TK_DATA) {
-			// error("Cannot get sizeof arbitrary length data");
 		} else {
 			error("sizeof: Missing open parenthesis following sizeof token");
 		}
@@ -1117,6 +1107,10 @@ void expression(uint8_t level) {
 			}
 			tkvaltype = sym->valtype;
 			tkisconst = false;
+		} else if ((sym->symtype & SYM_MASK) == SYM_CONSTANT) {
+			tkvaltype = sym->valtype;
+			tkval = sym->value;
+			tkisconst = true;
 		} else {
 			// printf("0x%X \"%s\"\n", sym->symtype, sym->name);
 			error("Invalid variable type");
@@ -1514,14 +1508,21 @@ void expression(uint8_t level) {
 				}
 			} else {
 				if (tkisconst) {
-					if (primarytype == T_LONG) {
+#ifdef PLATFORM_DESKTOP
+					if (primarytype == T_LONG && (outformat == FMT_BOS || outformat == FMT_CE))
+#else
+					if (primarytype == T_LONG)
+#endif
+					{
 						*expr = IR_IMM_32_SEC; // load secondary instead of push / load pri / pop sec / ex
 						*++expr = tkval;
 						*++expr = tkval >> 24;
+						*++expr = tmp + IR_OR - TK_OR;
 					} else {
 						*expr = tmp + IR_OR_CONST - TK_OR; // constant operation instead of push / load pri / pop sec / ex / operation
 						*++expr = tkval;
 					}
+					primaryisconst = false;
 				} else {
 					if (primarytype == T_LONG) {
 						*++expr = IR_POP_32;
@@ -1540,6 +1541,7 @@ void expression(uint8_t level) {
 				*++expr = (sym->symtype & SYM_GLOBAL) ? IR_STORE_GLOBAL : IR_STORE_LOCAL;
 				*++expr = signext(sym->value);
 				*++expr = tkvaltype & T_MASK;
+				primaryisconst = false;
 			} else {
 				error("Invalid value for post increment/decrement");
 			}
@@ -1635,7 +1637,6 @@ int statement(int stackdepth) {
 					}
 					tk_next();
 				} else if (tk == '{') {
-					unsigned int counter = 0;
 					tk_next();
 					do {
 						if (tk == TK_NUM) {
@@ -1658,7 +1659,6 @@ int statement(int stackdepth) {
 						} else {
 							error("Invalid value in local initializer array");
 						}
-						counter++;
 						tk_next();
 						if (tk == ',') {
 							tk_next();
@@ -1690,7 +1690,7 @@ int statement(int stackdepth) {
 			error("Missing closing parenthesis");
 		}
 		tk_next();
-		*++expr = IR_BZ;
+		*++expr = IR_BNZ;
 		b = ++expr;
 		stackdepth = statement(stackdepth);
 		if (tk == TK_ELSE) {
@@ -1702,6 +1702,7 @@ int statement(int stackdepth) {
 		}
 		*b = make_anon_sym(expr + 1 - exprstart, T_PTR);
 	} else if (tk == TK_WHILE) {
+		uint8_t while_expression_is_const = 0;
 		tk_next();
 		a = expr + 1;
 		if (tk != '(') {
@@ -1709,24 +1710,30 @@ int statement(int stackdepth) {
 		}
 		tk_next();
 		expression(TK_ASSIGN);
+		if (tkisconst) {
+			// printf("Optimizing while(constant)\n");
+			while_expression_is_const = (tkval>0)?2:1;
+		}
 		if (tk != ')') {
 			error("Missing closing parenthesis");
 		}
 		tk_next();
-		*++expr = IR_BZ;
-		b = ++expr;
-		if (tk == '{') {
-			tk_next();
-			while (tk != '}') {
-				stackdepth = statement(stackdepth);
-			}
-		} else if (tk != ';') {
+		if (while_expression_is_const == 0) {
+			*++expr = IR_BNZ;
+			b = ++expr;
+		}
+		if (tk != ';') {
 			stackdepth = statement(stackdepth);
 		}
-		tk_next();
-		*++expr = IR_JMP;
+		if (while_expression_is_const == 1) {
+			// printf("Optimizing while(false)\n");
+			expr = b; // rewind body of while(0)
+		}
+		*++expr = IR_JMP; // jump back to start of loop
 		*++expr = make_anon_sym(a - exprstart, T_PTR);
-		*b = make_anon_sym(expr + 1 - exprstart, T_PTR);
+		if (while_expression_is_const == 0) {
+			*b = make_anon_sym(expr + 1 - exprstart, T_PTR); // set exit jump location for non-constant while
+		}
 	} else if (tk == TK_DO) {
 		tk_next();
 		a = expr + 1;
@@ -1816,7 +1823,7 @@ void precompile(void) {
 		error("Failed to malloc space for address resolution stack\n");
 	}
 	memset(symtable, 0, sizeof(symbol));
-	memset(localsymstack, 0, sizeof(symbol*));
+	memset(localsymstack, 0, sizeof(symbol*) * SYM_STACK_SAVE_SIZE);
 #ifdef PLATFORM_DESKTOP
 	if (outformat == FMT_BOS || outformat == FMT_CE) {
 		reverse_argument_stack = true;
@@ -1883,12 +1890,21 @@ void precompile(void) {
 		add_sym_function("printline", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printline", (uint8_t[]){2, T_PTR+T_CHAR, T_WORD});
 		add_sym_function("printint", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printint", (uint8_t[]){2, T_LONG, T_WORD});
 		add_sym_function("printuint", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_printuint", (uint8_t[]){2, T_LONG, T_WORD});
+		add_sym_function("settextxy", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_settextxy", (uint8_t[]){2, T_CHAR, T_CHAR});
 		add_sym_function("nextcol", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_nextcol", (uint8_t[]){0});
 		add_sym_function("newline", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_VOID, "_newline", (uint8_t[]){0});
 		add_sym_function("getkey", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_CHAR, "_getkey", (uint8_t[]){0});
 		add_sym_function("waitkey", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_CHAR, "_waitkey", (uint8_t[]){0});
 		add_sym_function("waitkeycycle", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_CHAR, "_waitkeycycle", (uint8_t[]){0});
 		add_sym_function("verticalmenu", 0, SYM_CONST_FUNCTION|SYM_RESOLVED, T_WORD, "_menu", (uint8_t[]){1, T_PTR+T_VOID});
+		add_sym("sk_down", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 1);
+		add_sym("sk_left", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 2);
+		add_sym("sk_right", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 3);
+		add_sym("sk_up", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 4);
+		add_sym("sk_a", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 8);
+		add_sym("sk_b", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 9);
+		add_sym("sk_x", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 10);
+		add_sym("sk_y", 0, SYM_CONSTANT|SYM_RESOLVED, T_LONG, 11);
 	}
 #endif
 }
@@ -2016,8 +2032,8 @@ void compile(void) {
 			console_printline("Finished compiling included file");
 #endif
 #endif
-			free(srcdata);
-			free(fname);
+			_free(srcdata);
+			_free(fname);
 			srcdata = savedsrc;
 			srcoffset = savedsrcoffset;
 			srclen = savedsrclen;
@@ -2165,7 +2181,6 @@ void compile(void) {
 						if (tk != ';') {
 							error("Expected semicolon following function assignment value");
 						}
-						goto nexttoken;
 					} else if (tk != ';') {
 						error("Missing semicolon following function prototype");
 					}
@@ -2187,8 +2202,13 @@ void compile(void) {
 						*++expr = IR_LEAVE;
 					}
 				}
+#ifdef DEBUG
+				printf("Freeing locals\n");
+#endif
 				free_local_symbols();
-				// printf("Freed locals\n");
+#ifdef DEBUG
+				printf("Freed locals\n");
+#endif
 				goto nexttoken;
 			} else {
 				sym->value = globaladdr;
@@ -2295,7 +2315,7 @@ void try_resolve_symbols_generic(unsigned int offset) {
 		//	printf("  not yet resolved\n");
 		// }
 		if (sym->value == offset) {
-			out += sprintf(out, "label s_%llu\n", (_ptr)sym);
+			out += sprintf(out, "label .s_%llu\n", (_ptr)sym);
 		}
 	} while ((sym = sym->prev));
 }
@@ -2362,9 +2382,16 @@ void postassemble(void) {
 			}
 #ifdef PLATFORM_DESKTOP
 		} else {
-			for (unsigned int i = 0; i < expr-data_start; i++) {
-				try_resolve_symbols_generic(&data_start[i] - exprstart);
-				out += sprintf(out, "dw $%llX\n", data_start[i]);
+			if (outformat == FMT_BXS2307 || outformat == FMT_BXS2320) {
+				for (unsigned int i = 0; i < expr-data_start; i++) {
+					try_resolve_symbols_generic(&data_start[i] - exprstart);
+					out += sprintf(out, "dw $%X\n", (uint16_t)data_start[i]);
+				}
+			} else {
+				for (unsigned int i = 0; i < expr-data_start; i++) {
+					try_resolve_symbols_generic(&data_start[i] - exprstart);
+					out += sprintf(out, "db $%X\n", (uint8_t)data_start[i]);
+				}
 			}
 		}
 #endif
@@ -2700,14 +2727,18 @@ int main(int argc, char **argv) {
 					}
 				}
 			}
+			// probably no need to archive the tokenized source, since we aren't using usermem for compilation
+			// and by the time it would be archived, we know there's enough usermem to contain it.
+			/*
 			if (!ti_ArchiveHasRoom(out-outstart)) {
 				ti_Close(fd);
 				console_printline("Not enough space in archive");
 				console_printline("Please run GarbageCollect");
 				goto endmain;
 			}
+			*/
 			ti_Write(outstart, out-outstart, 1, fd);
-			ti_SetArchiveStatus(1, fd);
+			//ti_SetArchiveStatus(1, fd);
 			ti_Rewind(fd);
 			srcdata = ti_GetDataPtr(fd);
 			srclen = ti_GetSize(fd);
