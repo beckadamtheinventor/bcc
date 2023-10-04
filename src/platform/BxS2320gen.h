@@ -16,6 +16,7 @@ void try_resolve_symbols_BxS2320(unsigned int offset) {
 		//	printf("  not yet resolved\n");
 		// }
 		if (!(sym->symtype & SYM_RESOLVED)) {
+			// printf("Checking unresolved symbol %s with value %llx\n", sym->name, sym->value);
 			if (sym->value == offset) {
 				sym->symtype |= SYM_RESOLVED;
 				sym->resolved_value = PROGRAM_ORIGIN + out - outstart;

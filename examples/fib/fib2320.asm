@@ -1,7 +1,7 @@
 jp ._main
 ._exit := 0
-label ._1565538261104
-label ._1565540946928
+label ._1630921889904
+label ._1630910682096
 label ._fib
 push r12
 ld r12,r2
@@ -11,16 +11,18 @@ str r30,r12,-8
 str r30,r12,-4
 ld r30,r24
 cmpi r30,2
-jq nc, ._1565538261824
+jq nc, ._1630921890624
 ildr r30,r12,-4
 ld r2,r12
 pop r12
 ret
+label ._1630921890624
+label ._1630921890736
 ld r30,r24
 dec r30
 ld r24,r30
 or r30,r30
-jq z, ._1565538262048
+jq z, ._1630921890848
 ildr r30,r12,-4
 str r30,r12,-12
 ildr r30,r12,-4
@@ -31,12 +33,13 @@ add r30,r31
 str r30,r12,-4
 ildr r30,r12,-12
 str r30,r12,-8
-jq ._1565538261936
+jq ._1630921890736
+label ._1630921890848
 ildr r30,r12,-4
 ld r2,r12
 pop r12
 ret
-label ._1565538261440
+label ._1630921890112
 label ._main
 push r12
 ld r12,r2
@@ -45,18 +48,19 @@ ldi r30,0
 str r30a,r12,-1
 ldi r30,1
 str r30,r12,-5
+label ._1630910713920
 ildr r30a,r12,-1
 cmpi r30a,9
-jq z, ._1565540978976
+jq z, ._1630910714032
 call _cleartty
-ldi r30,.s_1565538262352
+ldi r30,.s_1630921891024
 ld r24,r30
 ldi r25,32767
 call _print
 ildr r30,r12,-5
 ld r24,r30
 call _printuint
-ldi r30,.s_1565538262528
+ldi r30,.s_1630921891200
 ld r24,r30
 call _printline
 ildr r30,r12,-5
@@ -68,11 +72,12 @@ call _waitkeycycle
 str r30a,r12,-1
 ildr r30a,r12,-1
 cmpi r30a,4
-jq nz, ._1565538262640
+jq nz, ._1630921891312
 ildr r30,r12,-5
 inc r30
 str r30,r12,-5
-jq ._1565540978752
+jq ._1630910713808
+label ._1630921891312
 ildr r30a,r12,-1
 cmpi r30a,1
 ildr r30,r12,-5
@@ -82,31 +87,40 @@ flagxor 1
 ld r30,r1a
 land r30a,r31a
 or r30a,r30a
-jq z, ._1565538262752
+jq z, ._1630921891424
 ildr r30,r12,-5
 dec r30
 str r30,r12,-5
-jq ._1565540978640
+jq ._1630910713696
+label ._1630921891424
 ildr r30a,r12,-1
 cmpi r30a,3
-jq nz, ._1565538262864
+jq nz, ._1630921891536
 ildr r30,r12,-5
 addi r30,16
 str r30,r12,-5
-jq ._1565540978528
+jq ._1630910713584
+label ._1630921891536
 ildr r30a,r12,-1
 cmpi r30a,2
-jq nz, ._1565540978416
+jq nz, ._1630921891648
 ildr r30,r12,-5
 subi r30,16
 str r30,r12,-5
-jq ._1565540978864
+label ._1630910713808
+label ._1630910713696
+label ._1630910713584
+label ._1630921891648
+jq ._1630910713920
+label ._1630910714032
 ld r2,r12
 pop r12
 ret
+label .s_1630921891200
 dw $29
 dw $3D
 dw $0
+label .s_1630921891024
 dw $66
 dw $69
 dw $62

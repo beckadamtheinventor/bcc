@@ -518,6 +518,7 @@ void save_sym_stack(void) {
 // free sym stack from current down to saved point, pop symbol save stack
 void free_local_symbols(void) {
 	// static size_t num_calls = 1;
+	symbol *tmp2;
 	symbol *sym = symtable;
 	symbol *tmp = *localsymstack;
 	*localsymstack-- = NULL;
@@ -529,16 +530,25 @@ void free_local_symbols(void) {
 			if (sym == tmp) {
 				break;
 			}
-			if (sym->next != NULL) {
-				if (sym->next->allowfree > 0) {
+			if (sym->allowfree > 0) {
 #ifdef DEBUG
-					printf("Freeing symbol \"%s\"\n", sym->next->name);
+				printf("Freeing symbol \"%s\"\n", sym->name);
 #endif
-					_free(sym->next);
-				}
+				tmp2 = sym->prev;
+				sym->prev = NULL;
+				_free(sym);
+				sym = tmp2;
+			} else {
+#ifdef DEBUG
+				printf("Not freeing symbol \"%s\"\n", sym->name);
+#endif
+				tmp2 = sym->prev;
+				sym->prev = tmp->prev;
+				sym->next = tmp;
+				tmp->prev = sym;
+				sym = tmp2;
 			}
-			sym->next = NULL;
-		} while ((sym = sym->prev) != NULL);
+		} while (sym != NULL);
 	}
 	symtable = tmp;
 }
