@@ -266,8 +266,13 @@ bool tkisconst = true;
 uint8_t tk, tkvaltype;
 #ifdef PLATFORM_DESKTOP
 bool reverse_argument_stack = false;
+uint8_t PTR_SIZE = 3, ARG_SIZE = 3, ARG_32_SIZE = 6, BYTE_SIZE = 1;
 #else
 bool reverse_argument_stack = true;
+#define PTR_SIZE 3
+#define ARG_SIZE 3
+#define ARG_32_SIZE 6
+#define BYTE_SIZE 1
 #endif
 
 #ifdef BOS_BUILD
@@ -298,6 +303,7 @@ char *srcdata;
 #define _ptr unsigned int
 #define signext(v) (v)
 #endif
+#define ceildiv(a, b) ((a)%(b)?((a)/(b)+1):((a)/(b)))
 
 #define FUNCTION_ARGUMENT_STACK_SIZE 32
 typedef struct _function_argument_stack_item {
@@ -310,7 +316,7 @@ uint32_t tkval;
 _ptr *resolvestack, *resolvestackstart, *expr, *exprstart, *data_start, *data_resolve_stack;
 _int data_resolve_sp = 0;
 uint8_t *out, *outstart;
-unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr, PROGRAM_ORIGIN = 0;
+unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr = 0, PROGRAM_ORIGIN = 0;
 symbol *symtable = NULL;
 symbol **localsymstack = NULL;
 
@@ -967,7 +973,7 @@ void expression(uint8_t level) {
 				}
 			} else if (tkvaltype >= T_PTR) {
 				*++expr = IR_IMM;
-				*++expr = 3;
+				*++expr = PTR_SIZE;
 			} else if (tkvaltype == T_STR) {
 				*++expr = IR_IMM_PROG_OFFSET;
 				*++expr = make_anon_sym_str(expr+1-exprstart, tkvalstr, tkvallen);
@@ -1015,18 +1021,18 @@ void expression(uint8_t level) {
 							*++expr = IR_PUSH_ARG_IMM_32;
 							*++expr = tkval;
 							*++expr = tkval >> 24;
-							tmp += 6;
+							tmp += ARG_32_SIZE;
 						} else {
 							*++expr = IR_PUSH_ARG_IMM;
 							*++expr = tkval;
-							tmp += 3;
+							tmp += ARG_SIZE;
 						}
 					} else if (sym->functionargs[sym->functionargs[0]+1-argno] == T_LONG) {
 						*++expr = IR_PUSH_ARG_32;
 						tmp += 6;
 					} else {
 						*++expr = IR_PUSH_ARG;
-						tmp += 3;
+						tmp += ARG_SIZE;
 					}
 					function_argument_stack[function_argument_stack_sp].expr_end = expr;
 					if (tk == ',') { // maybe unnecessary check?
@@ -1064,14 +1070,14 @@ void expression(uint8_t level) {
 						} else {
 							*++expr = IR_PUSH_ARG_IMM;
 							*++expr = tkval;
-							tmp += 3;
+							tmp += ARG_SIZE;
 						}
 					} else if (sym->functionargs[argno+1] == T_LONG) {
 						*++expr = IR_PUSH_ARG_32;
-						tmp += 6;
+						tmp += ARG_32_SIZE;
 					} else {
 						*++expr = IR_PUSH_ARG;
-						tmp += 3;
+						tmp += ARG_SIZE;
 					}
 					function_argument_stack[function_argument_stack_sp].expr_end = expr;
 					if (tk == ',') { // maybe unnecessary check?
@@ -1416,12 +1422,19 @@ void expression(uint8_t level) {
 		} else if (tk == TK_LOR) {
 			tk_next();
 			d = expr;
+			if (!primaryisconst) {
+				if (primarytype == T_LONG) {
+					*++expr = IR_PUSH_32;
+				} else {
+					*++expr = IR_PUSH;
+				}
+			}
 			expression(TK_LOR+1);
 			if (tkisconst && primaryisconst) {
 				primary = primary || tkval;
 			} else if (tkisconst) {
 				if (tkval == 0) {
-					*++expr = IR_SET_ONE_IF_NOT_ZERO;
+					*expr = IR_SET_ONE_IF_NOT_ZERO;
 				} else {
 					expr = d;
 				}
@@ -1432,18 +1445,30 @@ void expression(uint8_t level) {
 					expr = d;
 				}
 			} else {
+				if (primarytype == T_LONG) {
+					*++expr = IR_POP_32;
+				} else {
+					*++expr = IR_POP_SEC;
+				}
 				*++expr = IR_LOR;
 				primaryisconst = false;
 			}
 		} else if (tk == TK_LAND) {
 			tk_next();
 			d = expr;
+			if (!primaryisconst) {
+				if (primarytype == T_LONG) {
+					*++expr = IR_PUSH_32;
+				} else {
+					*++expr = IR_PUSH;
+				}
+			}
 			expression(TK_LAND+1);
 			if (tkisconst && primaryisconst) {
 				primary = primary && tkval;
 			} else if (tkisconst) {
 				if (tkval != 0) {
-					*++expr = IR_SET_ONE_IF_NOT_ZERO;
+					*expr = IR_SET_ONE_IF_NOT_ZERO;
 					primaryisconst = false;
 				} else {
 					expr = d;
@@ -1456,6 +1481,11 @@ void expression(uint8_t level) {
 					expr = d;
 				}
 			} else {
+				if (primarytype == T_LONG) {
+					*++expr = IR_POP_32;
+				} else {
+					*++expr = IR_POP_SEC;
+				}
 				*++expr = IR_LAND;
 				primaryisconst = false;
 			}
@@ -1512,8 +1542,19 @@ void expression(uint8_t level) {
 						}
 					}
 				} else {
-					*++expr = tmp + IR_OR_CONST - TK_OR;
-					*++expr = primary;
+					if (tmp == TK_DIV || tmp == TK_MOD || tmp == TK_SUB || (tmp >= TK_LT && tmp <= TK_SHR)) {
+						*++expr = IR_EX_SEC_PRI;
+						if (tkvaltype == T_LONG) {
+							*++expr = IR_IMM_32;
+						} else {
+							*++expr = IR_IMM;
+						}
+						*++expr = primary;
+						*++expr = tmp + IR_OR - TK_OR;
+					} else {
+						*++expr = tmp + IR_OR_CONST - TK_OR;
+						*++expr = primary;
+					}
 					primaryisconst = false;
 				}
 			} else {
@@ -1607,8 +1648,10 @@ int statement(int stackdepth) {
 					error("Missing closing bracket");
 				}
 				tk_next();
-			} else if ((ty & T_MASK) <= T_LONG) {
-				stackdepth -= (ty & T_MASK);
+			} else if (ty <= T_LONG) {
+				stackdepth -= ceildiv(ty & T_MASK, BYTE_SIZE);
+			} else {
+				stackdepth -= PTR_SIZE;
 			}
 			sym->value = stackdepth;
 			if (tk == TK_ASSIGN) {
@@ -1820,6 +1863,7 @@ int statement(int stackdepth) {
 }
 
 void precompile(void) {
+	symbol *sym;
 	if ((symtable = _malloc(sizeof(symbol))) == NULL) {
 		error("Failed to malloc space for initial symbol");
 	}
@@ -1834,6 +1878,7 @@ void precompile(void) {
 	}
 	memset(symtable, 0, sizeof(symbol));
 	memset(localsymstack, 0, sizeof(symbol*) * SYM_STACK_SAVE_SIZE);
+	add_sym("0init", 0, SYM_FUNCTION, T_VOID, expr + 1 - exprstart);
 #ifdef PLATFORM_DESKTOP
 	if (outformat == FMT_BOS || outformat == FMT_CE) {
 		reverse_argument_stack = true;
@@ -1855,6 +1900,10 @@ void precompile(void) {
 	add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
 #ifdef PLATFORM_DESKTOP
 	} else if (outformat == FMT_BXS2307) {
+		PTR_SIZE = 1;
+		ARG_SIZE = 1;
+		ARG_32_SIZE = 2;
+		BYTE_SIZE = 2;
 		add_sym("bool", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
 		add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
 		add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
@@ -1869,6 +1918,10 @@ void precompile(void) {
 		add_sym("int16_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_WORD);
 		add_sym("int32_t", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
 	} else if (outformat == FMT_BXS2320) {
+		PTR_SIZE = 2;
+		ARG_SIZE = 1;
+		ARG_32_SIZE = 2;
+		BYTE_SIZE = 2;
 		add_sym("bool", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_BOOL);
 		add_sym("void", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_VOID);
 		add_sym("unsigned", 0, SYM_CONSTANT|SYM_RESOLVED, T_TYPEDEF, T_LONG);
@@ -2106,12 +2159,12 @@ void compile(void) {
 				tk_next();
 				sym->value = globaladdr;
 				if (tk == TK_NUM) {
-					globaladdr += tkval * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
+					globaladdr += tkval * ((sym->valtype>=T_PTR)?PTR_SIZE:(sym->valtype & T_MASK));
 				} else if (tksym != NULL) {
 					if (!(tksym->symtype & SYM_CONSTANT)) {
 						error("Global array length initializer must be constant");
 					}
-					globaladdr += tksym->value * ((sym->valtype>=T_PTR)?T_INT:(sym->valtype & T_MASK));
+					globaladdr += tksym->value * ((sym->valtype>=T_PTR)?PTR_SIZE:(sym->valtype & T_MASK));
 				} else {
 					error("Invalid global declaration");
 				}
@@ -2133,7 +2186,7 @@ void compile(void) {
 				*++expr = sym;
 				tk_next();
 				stackdepth = nargs = 0;
-				argdepth = 6;
+				argdepth = PTR_SIZE * 2;
 				while (tk != ')') {
 					// printf("Parsing function parameter\n");
 					ty = T_INT;
@@ -2145,7 +2198,7 @@ void compile(void) {
 						tk_next();
 						ty += T_PTR;
 					}
-					if (ty == T_VOID && argdepth == 6 && tk == ')') {
+					if (ty == T_VOID && argdepth == PTR_SIZE * 2 && tk == ')') {
 						break;
 					}
 					// printf("parsed parameter with type 0x%X\n", ty);
@@ -2160,9 +2213,9 @@ void compile(void) {
 					// printf("added local symbol with type 0x%X name \"%s\"\n", ty, tksym->name);
 					sym->functionargs[++nargs] = ty;
 					if ((ty & T_MASK) == T_LONG) {
-						argdepth += 6;
+						argdepth += ARG_32_SIZE;
 					} else {
-						argdepth += 3;
+						argdepth += ARG_SIZE;
 					}
 					tk_next();
 					if (tk == ',') {
@@ -2221,16 +2274,20 @@ void compile(void) {
 #endif
 				goto nexttoken;
 			} else {
+				// printf("Defining global at address 0x%X type 0x%X\n", globaladdr, ty);
 				sym->value = globaladdr;
 				if (ty & T_INLINE_DATA) {
 					globaladdr += sym->datalen;
+				} else if ((ty & T_MASK) == T_STR) {
+					globaladdr += PTR_SIZE;
+				} else if (ty >= T_PTR) {
+					globaladdr += PTR_SIZE;
 				} else if ((ty & T_MASK) > 0) {
 					globaladdr += (ty & T_MASK);
-				} else if (ty >= T_PTR) {
-					globaladdr += 3;
 				} else {
 					error("Invalid global declaration");
 				}
+				// printf("New global address 0x%X\n", globaladdr);
 			}
 			if (tk == TK_ASSIGN) {
 				tk_next();

@@ -28,6 +28,19 @@ void try_resolve_symbols_BxS2320(unsigned int offset) {
 //	printf("\n");
 }
 
+void emit_jump_BxS2320(uint8_t bt, _ptr arg) {
+	if (bt == T_BOOL_CF) {
+		EMITL2("jq c, ._%llu\n", arg);
+	} else if (bt == T_BOOL_NCF) {
+		EMITL2("jq nc, ._%llu\n", arg);
+	} else if (bt == T_BOOL_ZF) {
+		EMITL2("jq z, ._%llu\n", arg);
+	} else if (bt == T_BOOL_NZF) {
+		EMITL2("jq nz, ._%llu\n", arg);
+	}
+}
+
+
 uint8_t convert_to_flag_BxS2320(uint8_t bt, uint8_t rnop) {
 	if (bt == T_CHAR) {
 		EMITL3("or r%ua,r%ua\n", rnop, rnop);
@@ -42,38 +55,46 @@ uint8_t convert_to_flag_BxS2320(uint8_t bt, uint8_t rnop) {
 	return bt;
 }
 
-uint8_t convert_flag_to_char_BxS2320(uint8_t bt, uint8_t rno) {
+uint8_t convert_flag_to_char_BxS2320(uint8_t bt, uint8_t rnop) {
 	if (bt == T_BOOL_CF) {
-		EMITL2("flagand -1\nld r%u,r1a\n", rno);
+		EMITL2("flagand 1\nld r%u,r1a\n", rnop);
 	} else if (bt == T_BOOL_NCF) {
-		EMITL2("flagand -1\nflagxor 1\nld r%u,r1a\n", rno);
+		EMITL2("flagxor 1\nflagand 1\nld r%u,r1a\n", rnop);
 	} else if (bt == T_BOOL_ZF) {
-		EMITL3("flagand -2\nld r%u,r1a\nshri r%ua,1\n", rno, rno);
+		EMITL3("flagand 2\nld r%u,r1a\nshri r%ua,1\n", rnop, rnop);
 	} else if (bt == T_BOOL_NZF) {
-		EMITL3("flagand -2\nflagxor 2\nld r%u,r1a\nshri r%ua,1\n", rno, rno);
+		EMITL3("flagxor 2\nflagand 2\nld r%u,r1a\nshri r%ua,1\n", rnop, rnop);
 	} else {
 		return bt;
 	}
 	return T_CHAR;
 }
 
+#define BXS2320_GLOBAL_ADDR 0xf0000000
 void assemble_BxS2320(void) {
 	int op = 0, oldopcode;
 	_ptr arg, *expr = exprstart;
 	uint8_t l, bt = T_VOID, *prevout = out, *prevprevout = out;
 	int32_t arg32;
 	uint8_t rnop = 30, rnos = 31, rarg = 24;
-	symbol *sym, *mainsym;
+	symbol *sym, *mainsym, *initsym;
 
 	PROGRAM_ORIGIN = 0;
 	lno = 0;
+
+	// call hidden init function if defined
+	if ((initsym = find_sym("0init", 0)) != NULL) {
+		EMITL("call ._init\n");
+	}
 
 	if ((mainsym = find_sym("main", 0)) == NULL) {
 		error("Missing function main()");
 	}
 
 	EMITL("jp ._main\n._exit := 0\n");
-
+	if (initsym != NULL) {
+		EMITL("label ._init\n");
+	}
 	// expr++;
 	while (1) {
 		prevprevout = prevout;
@@ -115,7 +136,11 @@ void assemble_BxS2320(void) {
 				break;
 			case IR_IMM:
 				expr++;
-				EMITL3("ldi r%u,%lld\n", rnop, arg);
+				if (arg == 0) {
+					EMITL2("ldz r%u\n", rnop);
+				} else {
+					EMITL3("ldi r%u,%lld\n", rnop, arg);
+				}
 				bt = T_INT;
 				break;
 			case IR_IMM_PROG_OFFSET:
@@ -125,18 +150,22 @@ void assemble_BxS2320(void) {
 				break;
 			case IR_IMM_8:
 				expr++;
-				EMITL3("ldi r%ua,%lld\n", rnop, arg);
+				if (arg == 0) {
+					EMITL2("ldz r%ua\n", rnop);
+				} else {
+					EMITL3("ldi r%ua,%lld\n", rnop, arg);
+				}
 				bt = T_CHAR;
 				break;
 			case IR_IMM_32_SEC:
 				expr++;
-				EMITL3("ldi r%u,%u\n", rnos, arg32);
+				EMITL3("ldi r%u,%d\n", rnos, arg32);
 				expr++;
 				bt = T_LONG;
 				break;
 			case IR_IMM_32:
 				expr++;
-				EMITL3("ldi r%u,%u\n", rnop, arg32);
+				EMITL3("ldi r%u,%d\n", rnop, arg32);
 				expr++;
 				bt = T_LONG;
 				break;
@@ -168,11 +197,9 @@ void assemble_BxS2320(void) {
 			case IR_POP_TER:
 			case IR_POP_SEC:
 				EMITL2("pop r%u\n", rnos);
-				bt = T_INT;
 				break;
 			case IR_POP_32:
 				EMITL2("pop r%u\n", rnos);
-				bt = T_LONG;
 				break;
 			case IR_EX_SEC_PRI:
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
@@ -191,7 +218,7 @@ void assemble_BxS2320(void) {
 				expr++;
 				/*
 				if (arg != 0) {
-					EMITL2("addi r2,%lld\n", arg/3);
+					EMITL2("addi r2,%lld\n", arg);
 				}
 				*/
 				rarg = 24;
@@ -226,14 +253,14 @@ void assemble_BxS2320(void) {
 							EMITL3("ld r%u,r12,%d\n", rnop, arg32);
 						}
 						bt = l + T_CHAR - IR_LOAD_CHAR;
-					} else if (arg32 >= 0 && arg32 < 6*3) {
+					} else if (arg32 >= 0 && arg32 < 2*6) {
 						l = *expr++;
 						if (l == IR_LOAD_CHAR) {
-							EMITL3("ld r%u,r%ua\n", rnop, 24+arg32/3-6/3);
+							EMITL3("ld r%u,r%ua\n", rnop, 24+arg32/2-1);
 						} else if (l == IR_LOAD_WORD) {
-							EMITL3("ld r%u,r%ul\n", rnop, 24+arg32/3-6/3);
+							EMITL3("ld r%u,r%ul\n", rnop, 24+arg32/2-1);
 						} else if (l == IR_LOAD_LONG || l == IR_LOAD_INT) {
-							EMITL3("ld r%u,r%u\n", rnop, 24+arg32/3-6/3);
+							EMITL3("ld r%u,r%u\n", rnop, 24+arg32/2-1);
 						} else {
 							error("Internal: Can't get address-of register");
 						}
@@ -250,12 +277,20 @@ void assemble_BxS2320(void) {
 				break;
 			case IR_LEA_GLOBAL:
 				expr++;
-				EMITL3("ldi r%u,%u\n", rnop, arg32);
+				EMITL3("ldi r%u,$%X\n", rnop, BXS2320_GLOBAL_ADDR+arg32);
+				bt = T_PTR;
 				break;
 			case IR_STORE_LOCAL:
 				expr++;
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
 				l = *expr++;
+				if (bt != l) {
+					if (bt == T_CHAR) {
+						EMITL3("ld r%u,r%ua\n", rnop, rnop);
+					} else if (bt == T_WORD) {
+						EMITL3("ld r%u,r%ul\n", rnop, rnop);
+					}
+				}
 				if (arg32 >= -128 && arg32 < 0) {
 					if (l == T_CHAR) {
 						EMITL3("str r%ua,r12,%d\n", rnop, arg32);
@@ -266,11 +301,11 @@ void assemble_BxS2320(void) {
 					}
 				} else if (arg32 >= 0 && arg32 < 6*3) {
 					if (l == T_CHAR) {
-						EMITL3("ld r%u,r%ua\n", 24+arg32/3-6/3, rnop);
+						EMITL3("ld r%u,r%ua\n", 24+arg32/2-1, rnop);
 					} else if (l == T_WORD) {
-						EMITL3("ld r%u,r%ul\n", 24+arg32/3-6/3, rnop);
+						EMITL3("ld r%u,r%ul\n", 24+arg32/2-1, rnop);
 					} else {
-						EMITL3("ld r%u,r%u\n", 24+arg32/3-6/3, rnop);
+						EMITL3("ld r%u,r%u\n", 24+arg32/2-1, rnop);
 					}
 				} else {
 					EMITL2("ld r8,r12\nadd r8,%d\n", arg32);
@@ -282,18 +317,27 @@ void assemble_BxS2320(void) {
 						EMITL2("str r%u,r8\n", rnop);
 					}
 				}
+				bt = l;
 				break;
 			case IR_STORE_GLOBAL:
 				expr++;
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
 				l = *expr++;
-				if (l == T_CHAR) {
-					EMITL3("sto r%ua,$%X\n", rnop, arg32);
-				} else if (l == T_WORD) {
-					EMITL3("sto r%ul,$%X\n", rnop, arg32);
-				} else {
-					EMITL3("sto r%u,$%X\n", rnop, arg32);
+				if (bt != l) {
+					if (bt == T_CHAR) {
+						EMITL3("ld r%u,r%ua\n", rnop, rnop);
+					} else if (bt == T_WORD) {
+						EMITL3("ld r%u,r%ul\n", rnop, rnop);
+					}
 				}
+				if (l == T_CHAR) {
+					EMITL3("sto r%ua,$%X\n", rnop, BXS2320_GLOBAL_ADDR+arg32);
+				} else if (l == T_WORD) {
+					EMITL3("sto r%ul,$%X\n", rnop, BXS2320_GLOBAL_ADDR+arg32);
+				} else {
+					EMITL3("sto r%u,$%X\n", rnop, BXS2320_GLOBAL_ADDR+arg32);
+				}
+				bt = l;
 				break;
 			case IR_LOAD_CHAR:
 				EMITL3("ildr r%ua,r%u\n", rnop, rnop);
@@ -340,7 +384,7 @@ void assemble_BxS2320(void) {
 					EMITL3("lor r%ua,r%ua\n", rnop, rnos);
 				} else if (bt == T_WORD) {
 					EMITL3("lor r%ul,r%ul\n", rnop, rnos);
-				} else if (bt == T_INT || bt == T_LONG) {
+				} else {
 					EMITL3("lor r%u,r%u\n", rnop, rnos);
 				}
 				break;
@@ -350,7 +394,7 @@ void assemble_BxS2320(void) {
 					EMITL3("land r%ua,r%ua\n", rnop, rnos);
 				} else if (bt == T_WORD) {
 					EMITL3("land r%ul,r%ul\n", rnop, rnos);
-				} else if (bt == T_INT || bt == T_LONG) {
+				} else {
 					EMITL3("land r%u,r%u\n", rnop, rnos);
 				}
 				break;
@@ -423,15 +467,15 @@ void assemble_BxS2320(void) {
 				if (bt == T_CHAR) {
 					EMITL2("inc r%ua\n", rnos);
 					EMITL3("cmp r%ua,r%ua\n", rnop, rnos);
-					EMITL2("dec r%ua\n", rnos);
+					// EMITL2("dec r%ua\n", rnos);
 				} else if (bt == T_WORD) {
 					EMITL2("inc r%ul\n", rnos);
 					EMITL3("cmp r%ul,r%ul\n", rnop, rnos);
-					EMITL2("dec r%ul\n", rnos);
+					// EMITL2("dec r%ul\n", rnos);
 				} else {
 					EMITL2("inc r%u\n", rnos);
 					EMITL3("cmp r%u,r%u\n", rnop, rnos);
-					EMITL2("dec r%u\n", rnos);
+					// EMITL2("dec r%u\n", rnos);
 				}
 				bt = T_BOOL_CF;
 				break;
@@ -440,15 +484,15 @@ void assemble_BxS2320(void) {
 				if (bt == T_CHAR) {
 					EMITL2("inc r%ua\n", rnos);
 					EMITL3("cmp r%ua,r%ua\n", rnop, rnos);
-					EMITL2("dec r%ua\n", rnos);
+					// EMITL2("dec r%ua\n", rnos);
 				} else if (bt == T_WORD) {
 					EMITL2("inc r%ul\n", rnos);
 					EMITL3("cmp r%ul,r%ul\n", rnop, rnos);
-					EMITL2("dec r%ul\n", rnos);
+					// EMITL2("dec r%ul\n", rnos);
 				} else {
 					EMITL2("inc r%u\n", rnos);
 					EMITL3("cmp r%u,r%u\n", rnop, rnos);
-					EMITL2("dec r%u\n", rnos);
+					// EMITL2("dec r%u\n", rnos);
 				}
 				bt = T_BOOL_CF;
 				break;
@@ -794,29 +838,13 @@ void assemble_BxS2320(void) {
 			case IR_BZ:
 				expr++;
 				bt = convert_to_flag_BxS2320(bt, rnop);
-				if (bt == T_BOOL_CF) {
-					EMITL2("jq c, ._%llu\n", arg);
-				} else if (bt == T_BOOL_NCF) {
-					EMITL2("jq nc, ._%llu\n", arg);
-				} else if (bt == T_BOOL_ZF) {
-					EMITL2("jq z, ._%llu\n", arg);
-				} else if (bt == T_BOOL_NZF) {
-					EMITL2("jq nz, ._%llu\n", arg);
-				}
+				emit_jump_BxS2320(bt, arg);
 				bt = 0;
 				break;
 			case IR_BNZ:
 				expr++;
 				bt = convert_to_flag_BxS2320(bt, rnop);
-				if (bt == T_BOOL_CF) {
-					EMITL2("jq nc, ._%llu\n", arg);
-				} else if (bt == T_BOOL_NCF) {
-					EMITL2("jq c, ._%llu\n", arg);
-				} else if (bt == T_BOOL_ZF) {
-					EMITL2("jq nz, ._%llu\n", arg);
-				} else if (bt == T_BOOL_NZF) {
-					EMITL2("jq z, ._%llu\n", arg);
-				}
+				emit_jump_BxS2320(bt^1, arg);
 				bt = 0;
 				break;
 			case IR_STRLEN:

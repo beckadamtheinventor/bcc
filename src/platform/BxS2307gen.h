@@ -59,16 +59,24 @@ void assemble_BxS2307(void) {
 	uint8_t l, bt = T_VOID, *prevout = out, *prevprevout = out;
 	uint32_t arg32;
 	uint8_t rnop = 9, rnop2 = 10, rnos = 11, rnos2 = 12, rarg = 16;
-	symbol *sym, *mainsym;
+	symbol *sym, *mainsym, *initsym;
 
 	PROGRAM_ORIGIN = 0;
 	lno = 0;
+
+	// call hidden init function if defined
+	if ((initsym = find_sym("0init", 0)) != NULL) {
+		EMITL("call ._init\n");
+	}
 
 	if ((mainsym = find_sym("main", 0)) == NULL) {
 		error("Missing function main()");
 	}
 
 	EMITL("call _main\n_exit := 0\n");
+	if (initsym != NULL) {
+		EMITL("label ._init\n");
+	}
 
 	// expr++;
 	while (1) {

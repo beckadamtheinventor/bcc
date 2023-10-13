@@ -113,7 +113,7 @@ void assemble_eZ80(void) {
 	int op = 0, oldopcode;
 	_ptr arg, *expr = exprstart;
 	uint8_t l, bt = T_VOID, *leaveaddress = NULL, *last_compare_ptr = NULL, *prevout = out, *prevprevout = out;
-	symbol *sym, *mainsym;
+	symbol *sym, *mainsym, *initsym;
 	uint8_t *addrtmp;
 
 	globaladdr = TI_pixelShadow;
@@ -139,6 +139,11 @@ void assemble_eZ80(void) {
 	errsp_offset = out - (outstart + 3);
 	EMIT_CALL_IMM(out, TI_RunIndicOff);
 	EMIT_CALL_IMM(out, TI_HomeUp);
+	// call hidden init function if defined
+	if ((initsym = find_sym("0init", 0)) != NULL) {
+		EMIT_CALL_IMM(out, 0);
+		resolve_later(out - (outstart + 3), initsym);
+	}
 	EMIT_CALL_IMM(out, 0);
 	resolve_later(out - (outstart + 3), mainsym);
 	exitroutineptr = PROGRAM_ORIGIN + out - outstart;
