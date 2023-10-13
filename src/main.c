@@ -2002,6 +2002,7 @@ void compile(void) {
 	_ptr *stackdepthloc;
 	uint8_t bt, ty;
 	int i;
+	bool can_define_globals = true;
 	lno = 1;
 	tk_next();
 	while (tk) {
@@ -2176,6 +2177,11 @@ void compile(void) {
 				tk_next();
 			} else if (tk == '(') { // function declaration
 				save_sym_stack();
+				if (can_define_globals) {
+					*++expr = IR_LEAVE;
+					can_define_globals = false;
+				}
+
 				sym->symtype = SYM_FUNCTION;
 				sym->value = expr + 1 - exprstart;
 				sym->functionargs = _malloc(FUNCTION_MAX_NUM_ARGS+1);
@@ -2274,6 +2280,9 @@ void compile(void) {
 #endif
 				goto nexttoken;
 			} else {
+				if (!can_define_globals) {
+					error("Globals must come before first function declaration");
+				}
 				// printf("Defining global at address 0x%X type 0x%X\n", globaladdr, ty);
 				sym->value = globaladdr;
 				if (ty & T_INLINE_DATA) {
