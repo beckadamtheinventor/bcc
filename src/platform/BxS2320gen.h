@@ -438,17 +438,6 @@ void assemble_BxS2320(void) {
 			case IR_COMPARE_GTEQ:
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
 				if (bt == T_CHAR) {
-					EMITL3("cmp r%ua,r%ua\n", rnop, rnos);
-				} else if (bt == T_WORD) {
-					EMITL3("cmp r%ul,r%ul\n", rnop, rnos);
-				} else {
-					EMITL3("cmp r%u,r%u\n", rnop, rnos);
-				}
-				bt = T_BOOL_NCF;
-				break;
-			case IR_COMPARE_GT:
-				bt = convert_flag_to_char_BxS2320(bt, rnop);
-				if (bt == T_CHAR) {
 					EMITL2("inc r%ua\n", rnos);
 					EMITL3("cmp r%ua,r%ua\n", rnop, rnos);
 					EMITL2("dec r%ua\n", rnos);
@@ -462,6 +451,17 @@ void assemble_BxS2320(void) {
 					EMITL2("dec r%u\n", rnos);
 				}
 				bt = T_BOOL_CF;
+				break;
+			case IR_COMPARE_GT:
+				bt = convert_flag_to_char_BxS2320(bt, rnop);
+				if (bt == T_CHAR) {
+					EMITL3("cmp r%ua,r%ua\n", rnop, rnos);
+				} else if (bt == T_WORD) {
+					EMITL3("cmp r%ul,r%ul\n", rnop, rnos);
+				} else {
+					EMITL3("cmp r%u,r%u\n", rnop, rnos);
+				}
+				bt = T_BOOL_NCF;
 				break;
 			case IR_SHL:
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
@@ -645,11 +645,11 @@ void assemble_BxS2320(void) {
 				expr++;
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
 				if (bt == T_CHAR) {
-					EMITL3("cmpi r%ua,%llu\n", rnop, arg);
+					EMITL3("cmpi r%ua,%llu\n", rnop, arg+1);
 				} else if (bt == T_WORD) {
-					EMITL3("cmpi r%ul,%llu\n", rnop, arg);
+					EMITL3("cmpi r%ul,%llu\n", rnop, arg+1);
 				} else {
-					EMITL3("cmpi r%u,%llu\n", rnop, arg);
+					EMITL3("cmpi r%u,%llu\n", rnop, arg+1);
 				}
 				bt = T_BOOL_NCF;
 				break;
@@ -657,11 +657,11 @@ void assemble_BxS2320(void) {
 				expr++;
 				bt = convert_flag_to_char_BxS2320(bt, rnop);
 				if (bt == T_CHAR) {
-					EMITL3("cmpi r%ua,%llu\n", rnop, arg+1);
+					EMITL3("cmpi r%ua,%llu\n", rnop, arg);
 				} else if (bt == T_WORD) {
-					EMITL3("cmpi r%ul,%llu\n", rnop, arg+1);
+					EMITL3("cmpi r%ul,%llu\n", rnop, arg);
 				} else {
-					EMITL3("cmpi r%u,%llu\n", rnop, arg+1);
+					EMITL3("cmpi r%u,%llu\n", rnop, arg);
 				}
 				bt = T_BOOL_NCF;
 				break;
