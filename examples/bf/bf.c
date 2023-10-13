@@ -1,5 +1,5 @@
 // a tiny BrainFuck interpreter
-// This example only works on BOS right now
+// This example will only work on BOS right now if it does work
 uint8_t t[65536] = {0};
 uint16_t p = 0;
 

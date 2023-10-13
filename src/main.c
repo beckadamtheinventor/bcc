@@ -211,7 +211,7 @@ enum {
 	IR_STRCPY, // strcpy(primary, secondary)
 	IR_STORE, // store arg bytes of primary to address in secondary
 	IR_SET_ONE_IF_NOT_ZERO, // set primary to 1 if primary is not zero
-	IR_DEFINE_FUNCTION, // Define function here. arg0 is symbol, arg1 is number of arguments
+	IR_DEFINE_FUNCTION, // Define function here. arg0 is symbol
 
 	IR_PUSH_ARG,
 	IR_PUSH_ARG_32,
@@ -1878,7 +1878,12 @@ void precompile(void) {
 	}
 	memset(symtable, 0, sizeof(symbol));
 	memset(localsymstack, 0, sizeof(symbol*) * SYM_STACK_SAVE_SIZE);
-	add_sym("0init", 0, SYM_FUNCTION, T_VOID, expr + 1 - exprstart);
+	sym = add_sym("0init", 0, SYM_FUNCTION, T_VOID, expr + 1 - exprstart);
+	*++expr = IR_DEFINE_FUNCTION;
+	*++expr = sym;
+	*++expr = IR_ENTER;
+	*++expr = 0;
+
 #ifdef PLATFORM_DESKTOP
 	if (outformat == FMT_BOS || outformat == FMT_CE) {
 		reverse_argument_stack = true;
@@ -2233,7 +2238,6 @@ void compile(void) {
 				}
 				// printf("Parsed %u function parameters\n", nargs);
 				sym->functionargs[0] = nargs;
-				*++expr = nargs;
 				tk_next();
 				if (tk != '{') {
 					if (tk == TK_ASSIGN) {
@@ -2524,7 +2528,7 @@ int main(int argc, char **argv) {
 	char *buffer, *afile = "a.asm", *bfile = "a.out";
 	_ptr oldopcode;
 	if (argc < 2) {
-		printf("Usage: %s src [-o bin] [-f [BOS|CE|BxS2307|BxS2320]]\n", argv[0]);
+		printf("Usage: %s src [-a ir.asm] [-o bin] [-f [BOS|CE|BxS2307|BxS2320]]\n", argv[0]);
 		return 0;
 	}
 	if ((fd = fopen(argv[1], "r")) == NULL) {
@@ -2660,7 +2664,7 @@ int main(int argc, char **argv) {
 		} else {
 			buffer[bufferlen++] = '?';
 			buffer[bufferlen++] = '\n';
-			printf("Invalid IR code: 0x%llX\nLast known valid IR code: 0x%llX\n", opcode, oldopcode);
+			printf("Invalid IR code: 0x%llX\nLast known valid IR code: \"%s\" (0x%llX)\n", opcode, IR_STRINGS[oldopcode], oldopcode);
 			//error("Internal: Invalid intermediate representation code");
 		}
 	}

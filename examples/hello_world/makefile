@@ -12,7 +12,7 @@ BCCDIR := ../../
 endif
 
 all: $(NAME).c
-	$(BCCDIR)bcc $(NAME).c $(NAME).asm $(NAME).bin
+	$(BCCDIR)bcc $(NAME).c -a $(NAME).asm -o $(NAME).bin
 
 var: all
 	convbin -i $(NAME).bin -o $(NAME).8xp -j bin -k 8xp -n DEMO

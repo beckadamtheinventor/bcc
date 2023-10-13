@@ -1,69 +1,75 @@
+call ._init
 jp ._main
 ._exit := 0
-label ._2595483883632
-label ._2595485193200
+label ._init
+label ._2012699565200
+label ._2012699562992
+ld r2,r12
+pop r12
+ret
+label ._2012698974512
 label ._fib
 push r12
 ld r12,r2
-addi r2,-12
+addi r2,-6
 ldi r30,1
-str r30,r12,-8
 str r30,r12,-4
-ld r30,r24
+str r30,r12,-2
+ld r30,r25
 cmpi r30,2
-jq nc, ._2595483884352
-ildr r30,r12,-4
+jq nc, ._2012698975232
+ildr r30,r12,-2
 ld r2,r12
 pop r12
 ret
-label ._2595483884352
-label ._2595483884464
-ld r30,r24
+label ._2012698975232
+label ._2012698975344
+ld r30,r25
 dec r30
-ld r24,r30
+ld r25,r30
 or r30,r30
-jq z, ._2595483884576
-ildr r30,r12,-4
-str r30,r12,-12
-ildr r30,r12,-4
+jq z, ._2012698975456
+ildr r30,r12,-2
+str r30,r12,-6
+ildr r30,r12,-2
 push r30
-ildr r30,r12,-8
+ildr r30,r12,-4
 pop r31
 add r30,r31
+str r30,r12,-2
+ildr r30,r12,-6
 str r30,r12,-4
-ildr r30,r12,-12
-str r30,r12,-8
-jq ._2595483884464
-label ._2595483884576
-ildr r30,r12,-4
+jq ._2012698975344
+label ._2012698975456
+ildr r30,r12,-2
 ld r2,r12
 pop r12
 ret
-label ._2595483883840
+label ._2012698974720
 label ._main
 push r12
 ld r12,r2
-addi r2,-5
-ldi r30,0
+addi r2,-3
+ldz r30
 str r30a,r12,-1
 ldi r30,1
-str r30,r12,-5
-label ._2595485224960
+str r30,r12,-3
+label ._2012699594864
 ildr r30a,r12,-1
 cmpi r30a,9
-jq z, ._2595485225072
+jq z, ._2012699594976
 call _cleartty
-ldi r30,.s_2595483884752
+ldi r30,.s_2012698975632
 ld r24,r30
 ldi r25,32767
 call _print
-ildr r30,r12,-5
+ildr r30,r12,-3
 ld r24,r30
 call _printuint
-ldi r30,.s_2595483884928
+ldi r30,.s_2012698975808
 ld r24,r30
 call _printline
-ildr r30,r12,-5
+ildr r30,r12,-3
 ld r24,r30
 call ._fib
 ld r24,r30
@@ -72,55 +78,60 @@ call _waitkeycycle
 str r30a,r12,-1
 ildr r30a,r12,-1
 cmpi r30a,4
-jq nz, ._2595483885040
-ildr r30,r12,-5
+jq nz, ._2012698975920
+ildr r30,r12,-3
 inc r30
-str r30,r12,-5
-jq ._2595485224848
-label ._2595483885040
+str r30,r12,-3
+jq ._2012699594752
+label ._2012698975920
 ildr r30a,r12,-1
 cmpi r30a,1
-ildr r30,r12,-5
+flagand 2
+ld r30,r1a
+shri r30a,1
+push r30
+ildr r30,r12,-3
 cmpi r30,2
-flagand -1
+pop r31
 flagxor 1
+flagand 1
 ld r30,r1a
 land r30a,r31a
 or r30a,r30a
-jq z, ._2595483885152
-ildr r30,r12,-5
+jq z, ._2012698976032
+ildr r30,r12,-3
 dec r30
-str r30,r12,-5
-jq ._2595485224736
-label ._2595483885152
+str r30,r12,-3
+jq ._2012699594640
+label ._2012698976032
 ildr r30a,r12,-1
 cmpi r30a,3
-jq nz, ._2595483885264
-ildr r30,r12,-5
+jq nz, ._2012699594304
+ildr r30,r12,-3
 addi r30,16
-str r30,r12,-5
-jq ._2595485224624
-label ._2595483885264
+str r30,r12,-3
+jq ._2012699594528
+label ._2012699594304
 ildr r30a,r12,-1
 cmpi r30a,2
-jq nz, ._2595483885376
-ildr r30,r12,-5
+jq nz, ._2012699594416
+ildr r30,r12,-3
 subi r30,16
-str r30,r12,-5
-label ._2595485224848
-label ._2595485224736
-label ._2595485224624
-label ._2595483885376
-jq ._2595485224960
-label ._2595485225072
+str r30,r12,-3
+label ._2012699594752
+label ._2012699594640
+label ._2012699594528
+label ._2012699594416
+jq ._2012699594864
+label ._2012699594976
 ld r2,r12
 pop r12
 ret
-label .s_2595483884928
+label .s_2012698975808
 dw $29
 dw $3D
 dw $0
-label .s_2595483884752
+label .s_2012698975632
 dw $66
 dw $69
 dw $62

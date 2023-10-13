@@ -863,7 +863,6 @@ void assemble_BxS2320(void) {
 				break;
 			case IR_DEFINE_FUNCTION:
 				expr++;
-				expr++;
 				EMITL2("label ._%s\n", ((symbol*)arg)->name);
 				break;
 			default:

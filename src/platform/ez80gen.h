@@ -138,6 +138,7 @@ void assemble_eZ80(void) {
 	EMIT_LD_IND_IMM_SP(out, 0);
 	errsp_offset = out - (outstart + 3);
 	EMIT_CALL_IMM(out, TI_RunIndicOff);
+	EMIT_CALL_IMM(out, TI_ClrScrnFull);
 	EMIT_CALL_IMM(out, TI_HomeUp);
 	// call hidden init function if defined
 	if ((initsym = find_sym("0init", 0)) != NULL) {
@@ -1875,7 +1876,6 @@ void assemble_eZ80(void) {
 				deisconst = false;
 				break;
 			case IR_DEFINE_FUNCTION:
-				expr++;
 				expr++;
 				bcisconst = false;
 				deisconst = false;
