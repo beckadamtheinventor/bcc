@@ -6,8 +6,21 @@
 #define LOAD_DE(a) if (!(deisconst && devalue == (unsigned)(a))) {EMIT_LD_DE_IMM(out, (unsigned)(a)); devalue = (a); deisconst = true;}
 #define LOAD_BC(a) if (!(bcisconst && bcvalue == (unsigned)(a))) {EMIT_LD_BC_IMM(out, (unsigned)(a)); bcvalue = (a); bcisconst = true;}
 
+/*
+ * Primary registers
+ *  32-bit: AUHL
+ *  24-bit: UHL
+ *  16-bit: HL
+ *   8-bit: A
+ * Secondary registers
+ *  32-bit: CUDE
+ *  24-bit: UDE
+ *  16-bit: DE
+ *   8-bit: E
+ */
 
-uint8_t convert_flag_to_char(uint8_t bt) {
+
+uint8_t ez80_convert_flag_to_char(uint8_t bt) {
 	if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
 		if (bt == T_BOOL_ZF) {
 			EMIT_LD_A_IMM(out, 1);
@@ -30,7 +43,7 @@ uint8_t convert_flag_to_char(uint8_t bt) {
 	return bt;
 }
 
-uint8_t convert_to_zf(uint8_t bt) {
+uint8_t ez80_convert_to_zf(uint8_t bt) {
 	if (bt == T_CHAR) {
 		EMIT_OR_A(out);
 		bt = T_BOOL_ZF;
@@ -69,39 +82,114 @@ uint8_t convert_to_zf(uint8_t bt) {
 	return T_BOOL_NZF;
 }
 
-void exchage_primary_secondary(uint8_t bt) {
-	if (bt == T_LONG) {
-		EMIT_PUSH_BC(out);
-		EMIT_LD_C_A(out);
-		EMIT_LD_A_E(out);
-		EMIT_LD_E_C(out);
-		EMIT_EX_IND_SP_HL(out);
-		EMIT_POP_BC(out);
+uint8_t ez80_convert_reg_type_secondary(uint8_t bt, uint8_t nt) {
+	if (bt == T_VOID || nt == T_VOID) {
+		error("Internal: Cannot convert to/from void type");
+	}
+	if (!(nt == bt || ((nt >= T_PTR || nt == T_INT) && (bt >= T_PTR || bt == T_INT)))) {
+		if (nt == T_WORD) {
+			if (bt == T_CHAR) {
+				EMIT_LD_D_IMM(out, 0);
+			}
+		} else if (nt == T_INT || nt >= T_PTR) {
+			if (bt == T_CHAR) {
+				EMIT_LD_B_IMM(out, 1);
+				EMIT_MLT_BC(out);
+			} else if (bt == T_WORD) {
+				EMIT_PUSH_HL(out);
+				EMIT_SIS_SUFFIX(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_POP_HL(out);
+			}
+		} else if (nt == T_LONG) {
+			if (bt == T_CHAR) {
+				EMIT_LD_D_IMM(out, 1);
+				EMIT_MLT_DE(out);
+				EMIT_LD_C_D(out);
+			} else if (bt == T_WORD) {
+				EMIT_PUSH_HL(out);
+				EMIT_SIS_SUFFIX(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_POP_HL(out);
+				EMIT_LD_C_IMM(out, 0);
+			} else {
+				// bt == T_INT
+				EMIT_LD_C_IMM(out, 0);
+			}
+		}
+	}
+	return nt;
+}
+
+uint8_t ez80_convert_reg_type(uint8_t bt, uint8_t nt) {
+	// printf("Converting types %u to %u\n", bt, nt);
+	if (bt == T_VOID || nt == T_VOID) {
+		error("Internal: Cannot convert to/from void type");
+	}
+	if (!(nt == bt || ((nt >= T_PTR || nt == T_INT) && (bt >= T_PTR || bt == T_INT)))) {
+		if (nt == T_CHAR) {
+			EMIT_LD_A_L(out);
+		} else if (nt == T_WORD) {
+			if (bt == T_CHAR) {
+				EMIT_LD_H_IMM(out, 0);
+				EMIT_LD_L_A(out);
+			}
+		} else if (nt == T_INT || nt >= T_PTR) {
+			if (bt == T_CHAR) {
+				EMIT_LD_H_IMM(out, 1);
+				EMIT_LD_L_A(out);
+				EMIT_MLT_HL(out);
+			} else if (bt == T_WORD) {
+				EMIT_PUSH_DE(out);
+				EMIT_SIS_SUFFIX(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_POP_DE(out);
+			}
+		} else if (nt == T_LONG) {
+			if (bt == T_CHAR) {
+				EMIT_LD_D_IMM(out, 1);
+				EMIT_MLT_DE(out);
+				EMIT_LD_C_D(out);
+			} else if (bt == T_WORD) {
+				EMIT_PUSH_DE(out);
+				EMIT_SIS_SUFFIX(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_EX_DE_HL(out);
+				EMIT_POP_DE(out);
+				EMIT_XOR_A(out);
+			} else {
+				// bt == T_INT
+				EMIT_XOR_A(out);
+			}
+		}
+	}
+	return nt;
+}
+
+void ez80_equalize_types(uint8_t *bt, uint8_t *st) {
+	if ((*bt & T_MASK) > (*st & T_MASK)) {
+		*st = ez80_convert_reg_type_secondary(*st, *bt);
 	} else {
-		if (bt == T_WORD) {
-			EMIT_SIS_SUFFIX(out);
-		}
-		if (bt != T_CHAR) {
-			EMIT_EX_DE_HL(out);
-		}
-		if (bt == T_CHAR) {
-			EMIT_LD_C_A(out);
-			EMIT_LD_A_E(out);
-			EMIT_LD_E_C(out);
-		}
+		*bt = ez80_convert_reg_type(*bt, *st);
 	}
 }
 
-void exchage_for_boot_math(uint8_t bt) {
-	if (bt == T_CHAR) {
-		EMIT_LD_C_L(out);
-		EMIT_LD_B_E(out);
-	} else if (bt == T_WORD) {
+void ez80_exchange_primary_secondary(uint8_t bt) {
+	if (bt == T_LONG) {
+		EMIT_PUSH_DE(out);
+		EMIT_LD_E_A(out);
+		EMIT_LD_A_C(out);
 		EMIT_LD_C_E(out);
-		EMIT_LD_B_D(out);
-	} else if (bt != T_LONG) {
-		EMIT_PUSH_HL(out);
-		EMIT_POP_BC(out);
+		EMIT_EX_IND_SP_HL(out);
+		EMIT_POP_DE(out);
+	} else if (bt == T_CHAR) {
+		EMIT_LD_D_E(out);
+		EMIT_LD_E_A(out);
+		EMIT_LD_A_D(out);
+	} else {
 		EMIT_EX_DE_HL(out);
 	}
 }
@@ -112,7 +200,7 @@ void assemble_eZ80(void) {
 	unsigned int hlvalue, devalue, bcvalue;
 	int op = 0, oldopcode;
 	_ptr arg, *expr = exprstart;
-	uint8_t l, bt = T_VOID, *leaveaddress = NULL, *last_compare_ptr = NULL, *prevout = out, *prevprevout = out;
+	uint8_t l, bt = T_VOID, st = T_VOID, *leaveaddress = NULL, *last_compare_ptr = NULL, *prevout = out, *prevprevout = out;
 	symbol *sym, *mainsym, *initsym;
 	uint8_t *addrtmp;
 
@@ -219,29 +307,29 @@ void assemble_eZ80(void) {
 				expr++;
 				if (expr[-2] == IR_PUSH_32 && expr[1] == IR_EX_SEC_PRI) {
 					out = prevprevout;
-					LOAD_BC(arg);
-					EMIT_LD_A_IMM(out, (unsigned)*expr);
+					LOAD_DE(arg);
+					EMIT_LD_C_IMM(out, (unsigned)*expr);
 					expr++;
+					st = T_LONG;
 				} else {
 					LOAD_HL(arg);
-					EMIT_LD_E_IMM(out, (unsigned)*expr);
-					deisconst = false;
+					EMIT_LD_A_IMM(out, (unsigned)*expr);
+					bt = T_LONG;
 				}
 				expr++;
-				bt = T_LONG;
 				break;
 			case IR_IMM_32_SEC:
 				expr++;
-				LOAD_BC(arg);
-				EMIT_LD_A_IMM(out, (unsigned)*expr);
+				LOAD_DE(arg);
+				EMIT_LD_C_IMM(out, (unsigned)*expr);
 				expr++;
 				bcisconst = true;
 				bcvalue = arg;
-				bt = T_LONG;
+				st = T_LONG;
 				break;
 			case IR_PUSH_ARG:
 			case IR_PUSH:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_LONG) {
 					EMIT_PUSH_HL(out);
 					EMIT_PUSH_DE(out);
@@ -251,57 +339,83 @@ void assemble_eZ80(void) {
 				} else {
 					EMIT_PUSH_HL(out);
 				}
+				push_reg_with_type(bt);
 				break;
 			case IR_PUSH_ARG_IMM_32:
 			case IR_PUSH_IMM_32:
 				expr++;
+				EMIT_LD_C_IMM(out, (unsigned)*expr);
+				expr++;
+				EMIT_PUSH_BC(out);
 				LOAD_BC(arg);
 				EMIT_PUSH_BC(out);
-				arg = *expr++;
-				EMIT_LD_C_IMM(out, (unsigned)arg);
-				EMIT_PUSH_BC(out);
 				bcisconst = false;
+				push_reg_with_type(T_LONG);
 				break;
 			case IR_PUSH_ARG_32:
 			case IR_PUSH_32:
 				EMIT_PUSH_HL(out);
 			case IR_PUSH_SEC:
 				EMIT_PUSH_DE(out);
+				push_reg_with_type(bt);
 				break;
 			case IR_PUSH_TER:
 				EMIT_PUSH_BC(out);
+				push_reg_with_type(bt);
 				break;
 			case IR_POP:
+				bt = pop_reg_with_type();
 				EMIT_POP_HL(out);
+				if (bt == T_LONG) {
+					EMIT_POP_DE(out);
+					deisconst = false;
+				}
 				hlisconst = false;
 				break;
 			case IR_POP_SEC:
-				if (bt == T_LONG) {
+				st = pop_reg_with_type();
+				if (st == T_LONG) {
 					EMIT_POP_BC(out);
-					EMIT_XOR_A(out);	
+					EMIT_INC_SP(out);
+					EMIT_POP_AF(out);
+					EMIT_DEC_SP(out);
+					bcisconst = false;
 				} else {
 					EMIT_POP_DE(out);
+					deisconst = false;
 				}
-				deisconst = false;
 				break;
 			case IR_POP_TER:
-				EMIT_POP_BC(out);
+				st = pop_reg_with_type();
+				if (st == T_LONG) {
+					EMIT_POP_BC(out);
+					EMIT_INC_SP(out);
+					EMIT_POP_AF(out);
+					EMIT_DEC_SP(out);
+				} else {
+					EMIT_POP_BC(out);
+				}
 				bcisconst = false;
 				break;
 			case IR_POP_32:
+				st = pop_reg_with_type();
 				EMIT_POP_BC(out);
-				EMIT_LD_A_C(out);
-				EMIT_POP_BC(out);
+				EMIT_INC_SP(out);
+				EMIT_POP_AF(out);
+				EMIT_DEC_SP(out);
 				bcisconst = false;
 				break;
 			case IR_EX_SEC_PRI:
-				bt = convert_flag_to_char(bt);
-				if (bt == T_LONG) {
+				bt = ez80_convert_flag_to_char(bt);
+				if (bt == T_LONG || st == T_LONG) {
 					bcisconst = false;
 				}
 				deisconst = false;
 				hlisconst = false;
-				exchage_primary_secondary(bt);
+				ez80_exchange_primary_secondary(bt);
+				l = st;
+				st = bt;
+				bt = l;
 				break;
 			case IR_CALL:
 				expr++;
@@ -372,129 +486,142 @@ void assemble_eZ80(void) {
 				expr++;
 				LOAD_BC(arg);
 				EMIT_PUSH_BC(out);
+				push_reg_with_type(T_INT);
 				break;
 			case IR_LEA_LOCAL:
 				expr++;
-				if ((unsigned)(arg+0x80) < 0x100) {
-					l = *expr++;
-					if ((expr[-3] == IR_PUSH || expr[-3] == IR_PUSH_32) && *expr == IR_EX_SEC_PRI) {
-						expr++;
-						out = prevprevout;
-						if (l == IR_LOAD_CHAR) {
-							EMIT_LD_E_IND_IX_DD(out, (unsigned)arg);
-							bt = T_CHAR;
-							deisconst = false;
-						} else if (l == IR_LOAD_WORD) {
-							EMIT_PUSH_HL(out);
-							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-							EMIT_SIS_SUFFIX(out);
-							EMIT_EX_DE_HL(out);
-							EMIT_POP_HL(out);
-							bt = T_WORD;
-							deisconst = false;
-						} else if (l == IR_LOAD_INT) {
+				l = *expr++;
+				if ((expr[-4] == IR_PUSH || expr[-4] == IR_PUSH_32) && *expr == IR_EX_SEC_PRI) {
+					expr++;
+					out = prevprevout;
+					if (l == IR_LOAD_CHAR) {
+						EMIT_LD_E_IND_IX_DD(out, (unsigned)arg);
+						st = T_CHAR;
+						deisconst = false;
+					} else if (l == IR_LOAD_WORD) {
+						EMIT_PUSH_HL(out);
+						EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
+						EMIT_SIS_SUFFIX(out);
+						EMIT_EX_DE_HL(out);
+						EMIT_POP_HL(out);
+						st = T_WORD;
+						deisconst = false;
+					} else if (l == IR_LOAD_INT) {
+						EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
+						st = T_INT;
+						deisconst = false;
+					} else if (l == IR_LOAD_LONG) {
+						if ((unsigned)(arg+3+0x80) < 0x100) {
 							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-							bt = T_INT;
-							deisconst = false;
-						} else if (l == IR_LOAD_LONG) {
-							if ((unsigned)(arg+3+0x80) < 0x100) {
-								EMIT_LD_BC_IND_IX_DD(out, (unsigned)arg);
-								EMIT_LD_A_IND_IX_DD(out, arg+3);
-							} else {
-								EMIT_PUSH_IX(out);
-								EMIT_LD_BC_IMM(out, (unsigned)arg);
-								EMIT_ADD_IX_BC(out);
-								EMIT_LD_BC_IND_IX_DD(out, 0);
-								EMIT_LD_A_IND_IX_DD(out, 3);
-								EMIT_POP_IX(out);
-							}
-							bt = T_LONG;
-							bcisconst = false;
+							EMIT_LD_C_IND_IX_DD(out, arg+3);
 						} else {
-							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-							bt = T_PTR;
-							expr--;
-							expr--;
-							deisconst = false;
+							EMIT_PUSH_IX(out);
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_ADD_IX_BC(out);
+							EMIT_LD_DE_IND_IX_DD(out, 0);
+							EMIT_LD_C_IND_IX_DD(out, 3);
+							EMIT_POP_IX(out);
 						}
+						st = T_LONG;
+						deisconst = false;
+						bcisconst = false;
 					} else {
-						if (l == IR_LOAD_CHAR) {
-							EMIT_LD_A_IND_IX_DD(out, (unsigned)arg);
-							bt = T_CHAR;
-						} else if (l == IR_LOAD_WORD) {
-							EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
-							EMIT_SIS_SUFFIX(out);
-							EMIT_EX_DE_HL(out);
-							bt = T_WORD;
-							deisconst = false;
-							hlisconst = false;
-						} else if (l == IR_LOAD_INT) {
+						EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
+						st = T_PTR;
+						expr--;
+						expr--;
+						deisconst = false;
+					}
+				} else {
+					if (l == IR_LOAD_CHAR) {
+						EMIT_LD_A_IND_IX_DD(out, (unsigned)arg);
+						bt = T_CHAR;
+					} else if (l == IR_LOAD_WORD) {
+						// probably don't *need* to zero the upper byte here
+						EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
+						// EMIT_LD_DE_IND_IX_DD(out, (unsigned)arg);
+						// EMIT_SIS_SUFFIX(out);
+						// EMIT_EX_DE_HL(out);
+						bt = T_WORD;
+						// deisconst = false;
+						hlisconst = false;
+					} else if (l == IR_LOAD_INT) {
+						EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
+						bt = T_INT;
+						hlisconst = false;
+					} else if (l == IR_LOAD_LONG) {
+						if ((unsigned)(arg+3+0x80) < 0x100) {
 							EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-							bt = T_INT;
-							hlisconst = false;
-						} else if (l == IR_LOAD_LONG) {
-							if ((unsigned)(arg+3+0x80) < 0x100) {
-								EMIT_LD_HL_IND_IX_DD(out, (unsigned)arg);
-								EMIT_LD_E_IND_IX_DD(out, arg+3);
-							} else {
-								EMIT_PUSH_IX(out);
-								EMIT_LD_BC_IMM(out, (unsigned)arg);
-								EMIT_ADD_IX_BC(out);
-								EMIT_LD_HL_IND_IX_DD(out, 0);
-								EMIT_LD_E_IND_IX_DD(out, 3);
-								EMIT_POP_IX(out);
-								bcisconst = false;
-							}
-							bt = T_LONG;
-							deisconst = false;
-							hlisconst = false;
+							EMIT_LD_A_IND_IX_DD(out, arg+3);
 						} else {
-							EMIT_LEA_HL_IX_DD(out, (unsigned)arg);
+							EMIT_PUSH_IX(out);
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_ADD_IX_BC(out);
+							EMIT_LD_HL_IND_IX_DD(out, 0);
+							EMIT_LD_A_IND_IX_DD(out, 3);
+							EMIT_POP_IX(out);
+							bcisconst = false;
+						}
+						bt = T_LONG;
+						hlisconst = false;
+					} else {
+						expr--;
+						if ((unsigned)(arg+0x80) < 0x100) {
+							EMIT_LEA_HL_IX_DD(out, arg);
+						} else {
+							EMIT_LEA_HL_IX_DD(out, 0);
+							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_ADD_HL_BC(out);
 							bt = T_PTR;
-							expr--;
+							bcisconst = false;
 							hlisconst = false;
 						}
 					}
-				} else {
-					EMIT_LEA_HL_IX_DD(out, 0);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_ADD_HL_BC(out);
-					bt = T_PTR;
-					bcisconst = false;
-					hlisconst = false;
 				}
 				break;
 			case IR_LEA_GLOBAL:
 				expr++;
 				l = *expr++;
-				if (l == IR_LOAD_CHAR) {
-					EMIT_LD_A_IND_IMM(out, (unsigned)arg);
-					bt = T_CHAR;
-				} else if (l == IR_LOAD_WORD) {
-					EMIT_LD_DE_IND_IMM(out, (unsigned)arg);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_EX_DE_HL(out);
-					bt = T_WORD;
-					deisconst = false;
-					hlisconst = false;
-				} else if (l == IR_LOAD_INT) {
-					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
-					bt = T_INT;
-					hlisconst = false;
-				} else if (l == IR_LOAD_LONG) {
-					EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
-					EMIT_LD_DE_IND_IMM(out, (unsigned)(arg+3));
-					bt = T_LONG;
-					deisconst = false;
+				bt = 0;
+				if (hlisconst && hlvalue == arg) {
+					if (l == IR_LOAD_CHAR) {
+						EMIT_LD_A_IND_HL(out);
+					} else if (l == IR_LOAD_WORD || l == IR_LOAD_INT) {
+						EMIT_LD_HL_IND_HL(out);
+					} else if (l == IR_LOAD_LONG) {
+						EMIT_LD_DE_IND_HL(out);
+						EMIT_INC_HL(out);
+						EMIT_INC_HL(out);
+						EMIT_INC_HL(out);
+						EMIT_LD_A_IND_HL(out);
+						EMIT_EX_DE_HL(out);
+					} else {
+						expr--;
+						bt = T_PTR;
+					}
 				} else {
-					expr--;
-					LOAD_HL(arg);
-					bt = T_PTR;
+					if (l == IR_LOAD_CHAR) {
+						EMIT_LD_A_IND_IMM(out, (unsigned)arg);
+					} else if (l == IR_LOAD_WORD || l == IR_LOAD_INT) {
+						EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
+						hlisconst = false;
+					} else if (l == IR_LOAD_LONG) {
+						EMIT_LD_HL_IND_IMM(out, (unsigned)arg);
+						EMIT_LD_A_IND_IMM(out, (unsigned)(arg+3));
+						deisconst = false;
+					} else {
+						expr--;
+						LOAD_HL(arg);
+						bt = T_PTR;
+					}
+				}
+				if (bt == 0) {
+					bt = l + T_CHAR - IR_LOAD_CHAR;
 				}
 				break;
 			case IR_STORE_LOCAL:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				l = *expr++;
 				if (bt == T_CHAR && l != T_CHAR) {
 					EMIT_OR_A(out);
@@ -571,7 +698,7 @@ void assemble_eZ80(void) {
 				break;
 			case IR_STORE_GLOBAL:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				l = *expr++;
 				if (bt == T_CHAR && l != T_CHAR) {
 					EMIT_OR_A(out);
@@ -685,7 +812,7 @@ void assemble_eZ80(void) {
 				}
 				break;
 			case IR_LOR:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_OR_A(out);
 					EMIT_JR_NZ_IMM(out, L_OR_E);
@@ -717,7 +844,7 @@ void assemble_eZ80(void) {
 				bt = T_BOOL_NZF;
 				break;
 			case IR_LAND:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_OR_A(out);
 					EMIT_JR_Z_IMM(out, L_OR_E);
@@ -764,7 +891,7 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_OR:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_OR_E(out);
 				} else if (bt == T_WORD) {
@@ -778,7 +905,7 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_AND:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_AND_E(out);
 				} else if (bt == T_WORD) {
@@ -792,7 +919,8 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_COMPARE_EQ:
-				bt = convert_flag_to_char(bt);
+			case IR_COMPARE_NEQ:
+				bt = ez80_convert_flag_to_char(bt);
 				EMIT_OR_A(out);
 				if (bt == T_CHAR) {
 					EMIT_SBC_A_E(out);
@@ -810,95 +938,19 @@ void assemble_eZ80(void) {
 					EMIT_SBC_HL_DE(out);
 					hlisconst = false;
 				}
-				bt = T_BOOL_ZF;
-				break;
-			case IR_COMPARE_NEQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NZF;
+				bt = (op == IR_COMPARE_EQ) ? T_BOOL_ZF : T_BOOL_NZF;
 				break;
 			case IR_COMPARE_LT:
-				bt = convert_flag_to_char(bt);
-				EMIT_SCF(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NCF;
-				break;
-			case IR_COMPARE_LTEQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_NCF;
-				break;
 			case IR_COMPARE_GTEQ:
-				bt = convert_flag_to_char(bt);
-				EMIT_SCF(out);
-				if (bt == T_CHAR) {
-					EMIT_SBC_A_E(out);
-				} else if (bt == T_WORD) {
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_C(out);
-					hlisconst = false;
-				} else {
-					EMIT_SBC_HL_DE(out);
-					hlisconst = false;
-				}
-				bt = T_BOOL_CF;
-				break;
+			case IR_COMPARE_LTEQ:
 			case IR_COMPARE_GT:
-				bt = convert_flag_to_char(bt);
-				EMIT_OR_A(out);
+				bt = ez80_convert_flag_to_char(bt);
+				st = ez80_convert_reg_type_secondary(st, bt);
+				if (op == IR_COMPARE_LTEQ || op == IR_COMPARE_GT) {
+					EMIT_SCF(out);
+				} else {
+					EMIT_OR_A(out);
+				}
 				if (bt == T_CHAR) {
 					EMIT_SBC_A_E(out);
 				} else if (bt == T_WORD) {
@@ -906,8 +958,6 @@ void assemble_eZ80(void) {
 					EMIT_SBC_HL_DE(out);
 					hlisconst = false;
 				} else if (bt == T_LONG) {
-					EMIT_LD_C_A(out);
-					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
 					EMIT_SBC_A_C(out);
 					hlisconst = false;
@@ -915,16 +965,18 @@ void assemble_eZ80(void) {
 					EMIT_SBC_HL_DE(out);
 					hlisconst = false;
 				}
-				bt = T_BOOL_CF;
+				bt = (op == IR_COMPARE_LT || op == IR_COMPARE_LTEQ) ? T_BOOL_CF : T_BOOL_NCF;
 				break;
 			case IR_SHL:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
+				st = ez80_convert_reg_type_secondary(st, T_CHAR);
 				if (bt == T_CHAR) {
-					EMIT_LD_B_L(out);
+					EMIT_LD_B_E(out);
 				} else {
-					EMIT_LD_C_L(out);
+					EMIT_LD_C_E(out);
 				}
-				EMIT_EX_DE_HL(out);
+				// EMIT_EX_DE_HL(out);
+				EMIT_LD_C_E(out);
 				if (bt == T_CHAR) {
 					EMIT_CALL_IMM(out, TI__bshl);
 				} else if (bt == T_WORD) {
@@ -939,13 +991,15 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_SHR:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
+				st = ez80_convert_reg_type_secondary(st, T_CHAR);
 				if (bt == T_CHAR) {
-					EMIT_LD_B_L(out);
+					EMIT_LD_B_E(out);
 				} else {
-					EMIT_LD_C_L(out);
+					EMIT_LD_C_E(out);
 				}
-				EMIT_EX_DE_HL(out);
+				// EMIT_EX_DE_HL(out);
+				EMIT_LD_C_E(out);
 				if (bt == T_CHAR) {
 					EMIT_CALL_IMM(out, TI__bshru);
 				} else if (bt == T_WORD) {
@@ -960,7 +1014,8 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_ADD:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
+				ez80_equalize_types(&bt, &st);
 				if (bt == T_CHAR) {
 					EMIT_ADD_A_E(out);
 				} else if (bt == T_WORD) {
@@ -968,19 +1023,15 @@ void assemble_eZ80(void) {
 					EMIT_ADD_HL_DE(out);
 				} else if (bt == T_LONG) {
 					EMIT_ADD_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
+					EMIT_ADC_A_C(out);
 				} else {
 					EMIT_ADD_HL_DE(out);
 				}
 				hlisconst = false;
 				break;
 			case IR_SUB:
-				bt = convert_flag_to_char(bt);
-				if (bt != T_LONG) {
-					exchage_primary_secondary(bt);
-				}
+				bt = ez80_convert_flag_to_char(bt);
+				ez80_equalize_types(&bt, &st);
 				if (bt == T_CHAR) {
 					EMIT_SUB_A_E(out);
 				} else if (bt == T_WORD) {
@@ -989,30 +1040,35 @@ void assemble_eZ80(void) {
 					EMIT_SBC_HL_DE(out);
 				} else if (bt == T_LONG) {
 					EMIT_OR_A(out);
-					EMIT_EX_DE_HL(out);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-					EMIT_LD_E_A(out);
+					EMIT_SBC_HL_DE(out);
+					EMIT_SBC_A_C(out);
 					deisconst = false;
 				} else {
 					EMIT_OR_A(out);
-					EMIT_SBC_HL_BC(out);
+					EMIT_SBC_HL_DE(out);
 				}
 				hlisconst = false;
 				break;
 			case IR_DIV:
-				bt = convert_flag_to_char(bt);
-				exchage_for_boot_math(bt);
+				bt = ez80_convert_flag_to_char(bt);
+				ez80_equalize_types(&bt, &st);
 				if (bt == T_CHAR) {
-					EMIT_LD_L_A(out);
 					EMIT_LD_H_IMM(out, 0);
-					EMIT_LD_C_E(out);
+					EMIT_LD_L_A(out);
 					EMIT_LD_B_H(out);
+					EMIT_LD_C_E(out);
 					EMIT_CALL_IMM(out, TI__sdivu);
+					EMIT_LD_A_L(out);
 				} else if (bt == T_WORD) {
+					EMIT_LD_B_D(out);
+					EMIT_LD_C_E(out);
 					EMIT_CALL_IMM(out, TI__sdivu);
 				} else if (bt == T_LONG) {
+					EMIT_PUSH_DE(out);
+					EMIT_POP_BC(out);
+					EMIT_LD_E_A(out);
 					EMIT_CALL_IMM(out, TI__ldivu);
+					EMIT_LD_A_E(out);
 					deisconst = false;
 				} else {
 					EMIT_CALL_IMM(out, TI__idivu);
@@ -1021,10 +1077,8 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_MUL:
-				bt = convert_flag_to_char(bt);
-				if (bt != T_CHAR) {
-					exchage_for_boot_math(bt);
-				}
+				bt = ez80_convert_flag_to_char(bt);
+				ez80_equalize_types(&bt, &st);
 				if (bt == T_CHAR) {
 					EMIT_LD_D_A(out);
 					EMIT_MLT_DE(out);
@@ -1042,27 +1096,32 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_MOD:
-				bt = convert_flag_to_char(bt);
-				exchage_for_boot_math(bt);
+				bt = ez80_convert_flag_to_char(bt);
+				ez80_equalize_types(&bt, &st);
 				if (bt == T_CHAR) {
-					EMIT_LD_L_A(out);
 					EMIT_LD_H_IMM(out, 0);
-					EMIT_LD_C_E(out);
+					EMIT_LD_L_A(out);
 					EMIT_LD_B_H(out);
-					EMIT_CALL_IMM(out, TI__sremu);
+					EMIT_LD_C_E(out);
+					EMIT_CALL_IMM(out, TI__sdivu);
+					EMIT_LD_A_L(out);
 				} else if (bt == T_WORD) {
+					EMIT_LD_B_D(out);
+					EMIT_LD_C_E(out);
 					EMIT_CALL_IMM(out, TI__sremu);
 				} else if (bt == T_LONG) {
 					EMIT_CALL_IMM(out, TI__lremu);
 					deisconst = false;
 				} else {
-					EMIT_CALL_IMM(out, TI__iremu);
+					EMIT_CALL_IMM(out, TI__idvrmu);
+					EMIT_EX_DE_HL(out);
+					deisconst = false;
 				}
 				bcisconst = false;
 				hlisconst = false;
 				break;
 			case IR_NEG:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_CPL(out);
 				} else {
@@ -1083,11 +1142,13 @@ void assemble_eZ80(void) {
 						EMIT_SBC_HL_DE(out);
 					}
 				}
-				deisconst = false;
-				hlisconst = false;
+				if (bt != T_CHAR) {
+					hlisconst = false;
+					deisconst = false;
+				}
 				break;
 			case IR_INC:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_INC_A(out);
 				} else if (bt == T_WORD) {
@@ -1096,16 +1157,17 @@ void assemble_eZ80(void) {
 				} else if (bt == T_LONG) {
 					EMIT_LD_BC_IMM(out, 1);
 					EMIT_ADD_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
+					EMIT_ADC_A_B(out);
+					bcisconst = false;
 				} else {
 					EMIT_INC_HL(out);
 				}
-				hlisconst = false;
+				if (bt != T_CHAR) {
+					hlisconst = false;
+				}
 				break;
 			case IR_DEC:
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_DEC_A(out);
 				} else if (bt == T_WORD) {
@@ -1115,13 +1177,14 @@ void assemble_eZ80(void) {
 					EMIT_LD_BC_IMM(out, 1);
 					EMIT_OR_A(out);
 					EMIT_SBC_HL_BC(out);
-					EMIT_ADC_A_E(out);
-					EMIT_LD_E_A(out);
-					deisconst = false;
+					EMIT_SBC_A_B(out);
+					bcisconst = false;
 				} else {
 					EMIT_DEC_HL(out);
 				}
-				hlisconst = false;
+				if (bt != T_CHAR) {
+					hlisconst = false;
+				}
 				break;
 			case IR_INC_SEC:
 				EMIT_INC_DE(out);
@@ -1141,7 +1204,7 @@ void assemble_eZ80(void) {
 				break;
 			case IR_OR_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_OR_IMM(out, (unsigned)arg);
 				} else if (bt == T_WORD) {
@@ -1152,23 +1215,23 @@ void assemble_eZ80(void) {
 					EMIT_OR_IMM(out, arg&0xff);
 					EMIT_LD_L_A(out);
 				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
+					EMIT_LD_E_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__lor);
-					deisconst = false;
+					EMIT_LD_A_E(out);
 				} else {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__ior);
 				}
 				if (bt != T_CHAR) {
+					hlisconst = false;
 					bcisconst = true;
 					bcvalue = arg;
 				}
-				hlisconst = false;
 				break;
 			case IR_AND_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_AND_IMM(out, (unsigned)arg);
 				} else if (bt == T_WORD) {
@@ -1179,50 +1242,26 @@ void assemble_eZ80(void) {
 					EMIT_AND_IMM(out, arg&0xff);
 					EMIT_LD_L_A(out);
 				} else if (bt == T_LONG) {
+					EMIT_LD_E_A(out);
 					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__land);
+					EMIT_LD_A_E(out);
 					deisconst = false;
 				} else {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__iand);
 				}
 				if (bt != T_CHAR) {
+					hlisconst = false;
 					bcisconst = true;
 					bcvalue = arg;
 				}
-				hlisconst = false;
-				break;
-			case IR_COMPARE_EQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_ZF;
 				break;
 			case IR_COMPARE_NEQ_CONST:
+			case IR_COMPARE_EQ_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_CP_IMM(out, (unsigned)arg);
 				} else if (bt == T_WORD) {
@@ -1231,106 +1270,35 @@ void assemble_eZ80(void) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_BC(out);
 				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
 					EMIT_OR_A(out);
+					EMIT_SBC_HL_BC(out);
+					if ((unsigned)arg < 256) {
+						EMIT_SBC_A_B(out);
+					} else {
+						EMIT_SBC_A_IMM(out, 0);
+					}
+				} else {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
+					EMIT_OR_A(out);
 					EMIT_SBC_HL_BC(out);
 				}
 				if (bt != T_CHAR) {
+					hlisconst = false;
 					bcisconst = true;
 					bcvalue = arg;
 				}
-				hlisconst = false;
-				bt = T_BOOL_NZF;
+				bt = (op == IR_COMPARE_EQ_CONST ? T_BOOL_ZF : T_BOOL_NZF);
 				break;
 			case IR_COMPARE_LT_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, (unsigned)arg);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_CF;
-				break;
+			case IR_COMPARE_GTEQ_CONST:
 			case IR_COMPARE_LTEQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, arg+1);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_CF;
-				break;
 			case IR_COMPARE_GT_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
-				if (bt == T_CHAR) {
-					EMIT_CP_IMM(out, arg+1);
-				} else if (bt == T_WORD) {
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_OR_A(out);
-					EMIT_SIS_SUFFIX(out);
-					EMIT_SBC_HL_BC(out);
-				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
-				} else {
-					EMIT_OR_A(out);
-					EMIT_LD_BC_IMM(out, arg+1);
-					EMIT_SBC_HL_BC(out);
+				bt = ez80_convert_flag_to_char(bt);
+				if (op == IR_COMPARE_LTEQ_CONST || op == IR_COMPARE_GT_CONST) {
+					arg++;
 				}
-				if (bt != T_CHAR) {
-					bcisconst = true;
-					bcvalue = arg;
-				}
-				hlisconst = false;
-				bt = T_BOOL_NCF;
-				break;
-			case IR_COMPARE_GTEQ_CONST:
-				expr++;
-				bt = convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_CP_IMM(out, (unsigned)arg);
 				} else if (bt == T_WORD) {
@@ -1339,13 +1307,16 @@ void assemble_eZ80(void) {
 					EMIT_SIS_SUFFIX(out);
 					EMIT_SBC_HL_BC(out);
 				} else if (bt == T_LONG) {
-					EMIT_XOR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_E(out);
+					if ((unsigned)arg < 256) {
+						EMIT_SBC_A_B(out);
+					} else {
+						EMIT_SBC_A_IMM(out, 0);
+					}
 				} else {
-					EMIT_OR_A(out);
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
+					EMIT_OR_A(out);
 					EMIT_SBC_HL_BC(out);
 				}
 				if (bt != T_CHAR) {
@@ -1353,11 +1324,11 @@ void assemble_eZ80(void) {
 					bcvalue = arg;
 				}
 				hlisconst = false;
-				bt = T_BOOL_NCF;
+				bt = (op == IR_COMPARE_LT_CONST || op == IR_COMPARE_LTEQ_CONST) ? T_BOOL_CF : T_BOOL_NCF;
 				break;
 			case IR_SHL_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					if (arg >= 8) {
 						EMIT_XOR_A(out);
@@ -1374,16 +1345,13 @@ void assemble_eZ80(void) {
 				} else if (bt == T_LONG) {
 					if (arg >= 32) {
 						EMIT_XOR_A(out);
-						EMIT_LD_E_A(out);
 						EMIT_SBC_HL_HL(out);
-					} else if (arg > 1) {
+					} else if (arg == 1) {
+						EMIT_ADD_HL_HL(out);
+						EMIT_ADC_A_A(out);
+					} else {
 						EMIT_LD_C_IMM(out, (unsigned)arg);
 						EMIT_CALL_IMM(out, TI__lshl);
-					} else {
-						EMIT_XOR_A(out);
-						EMIT_ADD_HL_HL(out);
-						EMIT_ADC_A_E(out);
-						EMIT_LD_E_A(out);
 					}
 				} else {
 					if (bt == T_WORD && arg >= 16) {
@@ -1415,7 +1383,7 @@ void assemble_eZ80(void) {
 				break;
 			case IR_SHR_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					if (arg >= 8) {
 						EMIT_XOR_A(out);
@@ -1432,24 +1400,49 @@ void assemble_eZ80(void) {
 						}
 					}
 				} else if (bt == T_WORD) {
-					EMIT_LD_C_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__sshru);
-					bcisconst = false;
+					if (arg >= 16) {
+						EMIT_LD_H_IMM(out, 0);
+						EMIT_LD_L_H(out);
+						hlisconst = true;
+						hlvalue = 0;
+					} else {
+						EMIT_LD_C_IMM(out, (unsigned)arg);
+						EMIT_CALL_IMM(out, TI__sshru);
+						bcisconst = false;
+						hlisconst = false;
+					}
 				} else if (bt == T_LONG) {
-					EMIT_LD_C_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__lshru);
-					bcisconst = false;
+					if (arg >= 32) {
+						EMIT_XOR_A(out);
+						EMIT_SBC_HL_HL(out);
+						hlisconst = true;
+						hlvalue = 0;
+					} else {
+						EMIT_LD_C_IMM(out, (unsigned)arg);
+						EMIT_LD_E_A(out);
+						EMIT_CALL_IMM(out, TI__lshru);
+						EMIT_LD_A_E(out);
+						bcisconst = false;
+						hlisconst = false;
+					}
 				} else {
-					EMIT_LD_C_IMM(out, (unsigned)arg);
-					EMIT_CALL_IMM(out, TI__ishru);
-					bcisconst = false;
+					if (arg >= 24) {
+						EMIT_OR_A(out);
+						EMIT_SBC_HL_HL(out);
+						hlisconst = true;
+						hlvalue = 0;
+					} else {
+						EMIT_LD_C_IMM(out, (unsigned)arg);
+						EMIT_CALL_IMM(out, TI__ishru);
+						bcisconst = false;
+						hlisconst = false;
+					}
 				}
-				hlisconst = false;
 				break;
 			case IR_ADD_CONST:
 				expr++;
 				if (arg != 0) {
-					bt = convert_flag_to_char(bt);
+					bt = ez80_convert_flag_to_char(bt);
 					if (bt == T_CHAR) {
 						if (arg == 1) {
 							EMIT_INC_A(out);
@@ -1460,11 +1453,12 @@ void assemble_eZ80(void) {
 						}
 					} else if (bt == T_LONG) {
 						EMIT_LD_BC_IMM(out, (unsigned)arg);
-						EMIT_XOR_A(out);
 						EMIT_ADD_HL_BC(out);
-						EMIT_ADC_A_E(out);
-						EMIT_LD_E_A(out);
-						deisconst = false;
+						if ((unsigned)arg < 256) {
+							EMIT_ADC_A_B(out);
+						} else {
+							EMIT_ADC_A_IMM(out, 0);
+						}
 						bcisconst = true;
 						bcvalue = arg;
 					} else {
@@ -1491,16 +1485,18 @@ void assemble_eZ80(void) {
 				break;
 			case IR_SUB_CONST:
 				expr++;
-				bt = convert_flag_to_char(bt);
+				bt = ez80_convert_flag_to_char(bt);
 				if (bt == T_CHAR) {
 					EMIT_SUB_A_IMM(out, (unsigned)arg);
 					break;
 				} else if (bt == T_LONG) {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
-					EMIT_LD_A_E(out);
 					EMIT_SBC_HL_BC(out);
-					EMIT_SBC_A_IMM(out, 0);
-					EMIT_LD_E_A(out);
+					if ((unsigned)arg < 256) {
+						EMIT_SBC_A_B(out);
+					} else {
+						EMIT_SBC_A_IMM(out, 0);
+					}
 				} else {
 					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					if (bt == T_WORD) {
@@ -1542,25 +1538,32 @@ void assemble_eZ80(void) {
 						bt = T_WORD;
 					} else if (bt == T_LONG) {
 						if (arg == 0) {
-							EMIT_OR_A(out);
+							EMIT_XOR_A(out);
 							EMIT_SBC_HL_HL(out);
-							EMIT_LD_E_L(out);
+							hlisconst = true;
+							hlvalue = 0;
 						} else if (arg == 2) {
-							EMIT_LD_A_E(out);
 							EMIT_ADD_HL_HL(out);
 							EMIT_ADC_A_A(out);
+							hlisconst = false;
 						} else if (arg > 2) {
-							EMIT_XOR_A(out);
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_LD_DE_IMM(out, (unsigned)arg);
+							if ((unsigned)arg < 256) {
+								EMIT_LD_C_D(out);
+							} else {
+								EMIT_LD_C_IMM(out, 0);
+							}
 							EMIT_CALL_IMM(out, TI__lmulu);
-							bcisconst = true;
-							bcvalue = arg;
+							hlisconst = false;
+							deisconst = true;
+							devalue = arg;
 						}
-						deisconst = false;
 					} else {
 						if (arg == 0) {
 							EMIT_OR_A(out);
 							EMIT_SBC_HL_HL(out);
+							hlisconst = true;
+							hlvalue = 0;
 						} else if (arg == 2) {
 							EMIT_ADD_HL_HL(out);
 						} else if (arg == 3) {
@@ -1683,26 +1686,30 @@ void assemble_eZ80(void) {
 						} else if (arg >= 256) {
 							EMIT_XOR_A(out);
 						} else {
-							EMIT_LD_L_A(out);
 							EMIT_LD_H_IMM(out, 0);
-							EMIT_LD_BC_IMM(out, (unsigned)arg);
+							EMIT_LD_L_A(out);
+							EMIT_LD_B_H(out);
+							EMIT_LD_C_E(out);
 							EMIT_CALL_IMM(out, TI__sdivu);
+							EMIT_LD_A_L(out);
 						}
 					} else if (bt == T_WORD) {
 						EMIT_LD_BC_IMM(out, (unsigned)arg);
 						EMIT_CALL_IMM(out, TI__sdivu);
 					} else if (bt == T_LONG) {
-						EMIT_XOR_A(out);
+						EMIT_LD_E_A(out);
 						EMIT_LD_BC_IMM(out, (unsigned)arg);
+						EMIT_XOR_A(out);
 						EMIT_CALL_IMM(out, TI__ldivu);
+						EMIT_LD_A_E(out);
 					} else {
 						EMIT_LD_BC_IMM(out, (unsigned)arg);
 						EMIT_CALL_IMM(out, TI__idivu);
 					}
+					bcisconst = true;
+					bcvalue = arg;
+					hlisconst = false;
 				}
-				bcisconst = true;
-				bcvalue = arg;
-				hlisconst = false;
 				break;
 			case IR_MOD_CONST:
 				expr++;
@@ -1714,21 +1721,23 @@ void assemble_eZ80(void) {
 					hlvalue = -1;
 					break;
 				} else if (bt >= T_BOOL_CF && bt <= T_BOOL_NZF) {
-					bt = convert_flag_to_char(bt);
-				} else if (bt == T_CHAR || bt == T_WORD) {
-					if (bt == T_CHAR) {
-						EMIT_LD_L_A(out);
-						if (!(hlisconst && hlvalue < 256)) {
-							EMIT_LD_H_IMM(out, 0);
-						}
-						EMIT_LD_B_H(out);
-					}
+					bt = ez80_convert_flag_to_char(bt);
+				} else if (bt == T_CHAR) {
+					EMIT_LD_H_IMM(out, 0);
+					EMIT_LD_L_A(out);
+					EMIT_LD_B_H(out);
+					EMIT_LD_C_IMM(out, (unsigned)arg);
+					EMIT_CALL_IMM(out, TI__sremu);
+				} else if (bt == T_WORD) {
+					EMIT_LD_BC_IMM(out, (unsigned)arg);
 					EMIT_CALL_IMM(out, TI__sremu);
 					break;
 				} else if (bt == T_LONG) {
+					EMIT_LD_E_A(out);
 					EMIT_LD_BC_IMM(out, arg);
 					EMIT_XOR_A(out);
 					EMIT_CALL_IMM(out, TI__lremu);
+					EMIT_LD_A_E(out);
 				} else {
 					EMIT_LD_BC_IMM(out, arg);
 					EMIT_CALL_IMM(out, TI__iremu);
@@ -1746,16 +1755,29 @@ void assemble_eZ80(void) {
 				hlisconst = false;
 				break;
 			case IR_BZ:
-				expr++;
-				bt = convert_to_zf(bt);
-				resolve_later(out + 1 - outstart, arg);
-				EMIT_JP_Z_IMM(out, 0);
-				break;
 			case IR_BNZ:
 				expr++;
-				bt = convert_to_zf(bt);
-				resolve_later(out + 1 - outstart, arg);
-				EMIT_JP_NZ_IMM(out, 0);
+				if (bt >= T_BOOL_CF && bt <= T_BOOL_NCF) {
+					if ((bt ^ (op - IR_BZ)) & 1) {
+						EMIT_JP_NC_IMM(out, 0);
+					} else {
+						EMIT_JP_C_IMM(out, 0);
+					}
+				} else if (bt >= T_BOOL_ZF && bt <= T_BOOL_NZF) {
+					if ((bt ^ (op - IR_BZ)) & 1) {
+						EMIT_JP_NZ_IMM(out, 0);
+					} else {
+						EMIT_JP_Z_IMM(out, 0);
+					}
+				} else {
+					bt = ez80_convert_to_zf(bt);
+					if (op == IR_BZ) {
+						EMIT_JP_Z_IMM(out, 0);
+					} else {
+						EMIT_JP_NZ_IMM(out, 0);
+					}
+				}
+				resolve_later(out + -3 - outstart, arg);
 				break;
 			case IR_STRLEN:
 				EMIT_PUSH_HL(out);
@@ -1767,104 +1789,33 @@ void assemble_eZ80(void) {
 				break;
 			case IR_STORE:
 				expr++;
-				bt = convert_flag_to_char(bt);
-				if (arg == T_LONG) {
-					if (bt == T_CHAR) {
-						EMIT_OR_A(out);
-						EMIT_SBC_HL_HL(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_A(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						deisconst = true;
-						devalue = 0;
-						hlisconst = false;
-					} else if (bt == T_LONG) {
-						EMIT_LD_A_E(out);
-						EMIT_LD_IND_BC_A(out);
-						EMIT_PUSH_BC(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_POP_HL(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_E_A(out);
-						bcisconst = false;
-						deisconst = false;
-						hlisconst = false;
-					} else if (bt == T_WORD) {
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_E(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_D(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_SIS_SUFFIX(out);
-						EMIT_EX_DE_HL(out);
-						deisconst = false;
-						hlisconst = false;
-					} else {
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						EMIT_INC_HL(out);
-						EMIT_INC_HL(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_EX_DE_HL(out);
-						deisconst = false;
-					}
-				} else if (arg == T_CHAR) {
-					if (bt != T_CHAR) {
-						EMIT_LD_A_L(out);
-					}
+				bt = ez80_convert_flag_to_char(bt);
+				bt = ez80_convert_reg_type(bt, arg);
+				st = ez80_convert_reg_type_secondary(st, T_PTR);
+				if (bt == T_CHAR) {
 					EMIT_LD_IND_DE_A(out);
-				} else if (arg == T_WORD) {
+				} else if (bt == T_WORD) {
 					EMIT_EX_DE_HL(out);
-					if (bt == T_CHAR) {
-						EMIT_LD_IND_HL_A(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						EMIT_LD_H_IND_HL(out);
-						EMIT_LD_L_A(out);
-					} else {
-						EMIT_LD_IND_HL_E(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_D(out);
-						EMIT_LD_H_D(out);
-						EMIT_LD_L_E(out);
-					}
+					EMIT_LD_IND_HL_E(out);
+					EMIT_INC_HL(out);
+					EMIT_LD_IND_HL_D(out);
+					EMIT_EX_DE_HL(out);
+					deisconst = false;
+				} else if (bt == T_INT) {
+					EMIT_EX_DE_HL(out);
+					EMIT_LD_IND_HL_DE(out);
+					EMIT_EX_DE_HL(out);
+					deisconst = false;
+				} else if (bt == T_LONG) {
+					EMIT_EX_DE_HL(out);
+					EMIT_LD_IND_HL_DE(out);
+					EMIT_INC_HL(out);
+					EMIT_INC_HL(out);
+					EMIT_INC_HL(out);
+					EMIT_LD_IND_HL_A(out);
+					EMIT_EX_DE_HL(out);
 					deisconst = false;
 					hlisconst = false;
-					bt = T_WORD;
-				} else { // arg == T_INT or equivalent size type
-					if (bt == T_CHAR) {
-						EMIT_OR_A(out);
-						EMIT_SBC_HL_HL(out);
-						EMIT_LD_L_A(out);
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						hlisconst = false;
-						deisconst = false;
-					} else if (bt == T_WORD) {
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_E(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_D(out);
-						EMIT_INC_HL(out);
-						EMIT_LD_IND_HL_IMM(out, 0);
-						hlisconst = false;
-						deisconst = false;
-					} else {
-						bool tmpbool = hlisconst;
-						EMIT_EX_DE_HL(out);
-						EMIT_LD_IND_HL_DE(out);
-						hlisconst = deisconst;
-						hlvalue = devalue;
-						deisconst = tmpbool;
-						devalue = hlvalue;
-					}
 				}
 				break;
 			case IR_STRCPY:
@@ -1880,6 +1831,14 @@ void assemble_eZ80(void) {
 				bcisconst = false;
 				deisconst = false;
 				hlisconst = false;
+				break;
+			case IR_SET_BT:
+				bt = arg;
+				expr++;
+				break;
+			case IR_SET_ST:
+				st = arg;
+				expr++;
 				break;
 			default:
 #ifdef PLATFORM_DESKTOP

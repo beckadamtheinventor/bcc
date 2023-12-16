@@ -12,7 +12,7 @@ _compute_hash:
 	xor a,a
 	sbc hl,hl
 .loop:
-	add a,(iy)
+	xor a,(iy)
 	ld l,a
 	jr nc,.nocarryonbyte0
 	inc h

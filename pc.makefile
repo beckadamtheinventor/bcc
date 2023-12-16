@@ -20,7 +20,7 @@ ARCH       = $(call MKDIR,release) && cd tools\installer && ISCC.exe /DAPP_VERSI
 QUOTE_ARG  = "$(subst ",',$1)"#'
 APPEND     = @echo.$(subst ",^",$(subst \,^\,$(subst &,^&,$(subst |,^|,$(subst >,^>,$(subst <,^<,$(subst ^,^^,$1))))))) >>$@
 
-CC := C:\raylib\w64devkit\bin\gcc.exe
+CC := gcc.exe
 
 CCFLAGS := -O3 -std=c99 -Iexternal -DPLATFORM_DESKTOP -DPLATFORM_WINDOWS -Wextra
 

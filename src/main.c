@@ -217,6 +217,9 @@ enum {
 	IR_PUSH_ARG_32,
 	IR_PUSH_ARG_IMM,
 	IR_PUSH_ARG_IMM_32,
+	
+	IR_SET_BT, // manually set type of primary register
+	IR_SET_ST, // manually set type of secondary register
 
 	IR_INVALID_OPCODE,
 };
@@ -290,6 +293,7 @@ char *srcdata;
 #define DATA_RESOLVE_STACK_SIZE 4096
 #define RESOLVE_STACK_SIZE 65536
 #define SYM_STACK_SAVE_SIZE 256
+#define REGTYPE_STACK_SIZE 256
 #define _int int32_t
 #define _ptr long long
 #define signext(v) ((v>=0x80000000)?((v)|0xffffffff00000000llu):(v))
@@ -298,7 +302,8 @@ char *srcdata;
 #define OUTPUT_BUFFER_SIZE 0xFFE8
 #define DATA_RESOLVE_STACK_SIZE 1024
 #define RESOLVE_STACK_SIZE 4096
-#define SYM_STACK_SAVE_SIZE 16
+#define SYM_STACK_SAVE_SIZE 64
+#define REGTYPE_STACK_SIZE 64
 #define _int int
 #define _ptr unsigned int
 #define signext(v) (v)
@@ -315,7 +320,8 @@ char *tkvalstr;
 uint32_t tkval;
 _ptr *resolvestack, *resolvestackstart, *expr, *exprstart, *data_start, *data_resolve_stack;
 _int data_resolve_sp = 0;
-uint8_t *out, *outstart;
+uint8_t *out, *outstart, *regtypestack, *regtypestack_base;
+#define regtypestack_end (&regtypestack_base[REGTYPE_STACK_SIZE])
 unsigned int tkvallen, errsp_offset, exitroutineptr, lno, srcoffset, srclen, globaladdr = 0, PROGRAM_ORIGIN = 0;
 symbol *symtable = NULL;
 symbol **localsymstack = NULL;
@@ -424,7 +430,7 @@ uint16_t compute_hash(const char *data, unsigned int len);
 uint16_t compute_hash(const char *data, unsigned int len) {
 	uint16_t hash = 0;
 	for (unsigned int i = 0; i < len; i++) {
-		hash = hash*17 + data[i] - 1;
+		hash = (hash*17 ^ data[i]) - 1;
 	}
 	return hash;
 }
@@ -1874,7 +1880,10 @@ void precompile(void) {
 		error("Failed to malloc space for symbol stack local save stack");
 	}
 	if ((resolvestack = resolvestackstart = _malloc(RESOLVE_STACK_SIZE*sizeof(_ptr))) == NULL) {
-		error("Failed to malloc space for address resolution stack\n");
+		error("Failed to malloc space for address resolution stack");
+	}
+	if ((regtypestack = regtypestack_base = _malloc(REGTYPE_STACK_SIZE)) == NULL) {
+		error("Failed to malloc space for regtype stack");
 	}
 	memset(symtable, 0, sizeof(symbol));
 	memset(localsymstack, 0, sizeof(symbol*) * SYM_STACK_SAVE_SIZE);
@@ -2501,6 +2510,21 @@ void try_resolve_symbols(unsigned int offset) {
 //	printf("\n");
 }
 
+void push_reg_with_type(uint8_t type) {
+	if (regtypestack >= regtypestack_end) {
+		error("Internal: Regtype stack overflow");
+	}
+	*regtypestack++ = type;
+}
+
+uint8_t pop_reg_with_type(void) {
+	if (regtypestack - 1 < regtypestack_base) {
+		error("Internal: Regtype stack underflow");
+	}
+	return *--regtypestack;
+}
+
+
 #include "platform/ez80gen.h"
 
 #ifdef PLATFORM_DESKTOP
@@ -2716,7 +2740,7 @@ int main(int argc, char **argv) {
 		} else if (outformat == FMT_BXS2320) {
 			atype = "BxS2320";
 		}
-		printf("Wrote %lld bytes of %s assembly to \"%s\"\n", out-outstart, atype, bfile);
+		printf("Wrote %llu bytes of %s assembly to \"%s\"\n", out-outstart, atype, bfile);
 	}
 #else
 #define OUT_BUFFER_LOC 0xD52C00

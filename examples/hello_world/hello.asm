@@ -1,13 +1,13 @@
 
-DEFINE_FUNCTION "0init", $0, $53B41EB0
+DEFINE_FUNCTION "0init", $0, $776998
 $2     : ENTER $0
 $4     : LEAVE
 
-DEFINE_FUNCTION "os_PutStrLine", $21D30, $21D30, $53AB0540
+DEFINE_FUNCTION "os_PutStrLine", $21D30, $21D30, $776D98
 
-DEFINE_FUNCTION "os_NewLine", $207F0, $207F0, $53AB11B0
+DEFINE_FUNCTION "os_NewLine", $207F0, $207F0, $7704B0
 
-DEFINE_FUNCTION "testfunction", $9, $53AB1230
+DEFINE_FUNCTION "testfunction", $9, $770518
 $B     : ENTER $0
 $D     : LEA_LOCAL $C
 $F     : LOAD_INT
@@ -23,14 +23,14 @@ $1A    : POP_SEC
 $1B    : ADD
 $1C    : LEAVE
 
-DEFINE_FUNCTION "main", $1D, $53AB0730
+DEFINE_FUNCTION "main", $1D, $77A198
 $1F    : ENTER -$C
-$21    : IMM_PROG_OFFSET $56, $53AB0780
+$21    : IMM_PROG_OFFSET $56, $779D30
 $23    : STORE_LOCAL -$3, $41
 $26    : PUSH_ARG
-$27    : CALL "os_PutStrLine", $21D30, $53AB0540
+$27    : CALL "os_PutStrLine", $21D30, $776D98
 $29    : ADJ $3
-$2B    : CALL "os_NewLine", $207F0, $53AB11B0
+$2B    : CALL "os_NewLine", $207F0, $7704B0
 $2D    : ADJ $0
 $2F    : IMM $7B
 $31    : STORE_LOCAL -$6, $3
@@ -50,7 +50,7 @@ $49    : PUSH_ARG
 $4A    : LEA_LOCAL -$6
 $4C    : LOAD_INT
 $4D    : PUSH_ARG
-$4E    : CALL "testfunction", $53AB1230
+$4E    : CALL "testfunction", $770518
 $50    : ADJ $9
 $52    : POP_SEC
 $53    : ADD
