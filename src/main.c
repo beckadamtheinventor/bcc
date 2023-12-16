@@ -227,6 +227,7 @@ enum {
 enum {
 	TK_NUM = 128, TK_STR, TK_CHAR, TK_DATA, TK_FUN, TK_ID,
 	TK_IF, TK_ELSE, TK_WHILE, TK_DO, TK_ENUM, TK_RETURN, TK_SIZEOF, TK_TYPEDEF, TK_STRUCT, TK_INCLUDE,
+	TK_PIF, TK_PELSE, TK_PENDIF, TK_PIFDEF, TK_PIFNDEF,
 	TK_ASSIGN, TK_ADDEQ, TK_SUBEQ, TK_MULEQ, TK_DIVEQ, TK_MODEQ, TK_COND, TK_LOR, TK_LAND, TK_OR, TK_XOR, TK_AND,
 	TK_EQ, TK_NE, TK_LT, TK_GT, TK_LTEQ, TK_GTEQ, TK_SHL, TK_SHR, TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
 	TK_STRUCTPTRACCESS, TK_STRUCTACCESS,
@@ -463,7 +464,11 @@ symbol *add_sym(const char *name, unsigned int namelen, uint8_t symtype, uint8_t
 	memcpy(sym->name, name, namelen);
 	sym->name[namelen] = 0;
 	sym->symtype = symtype;
-	sym->valtype = valtype;
+	if (valtype == T_PTR+T_CHAR) {
+		sym->valtype = T_STR;
+	} else {
+		sym->valtype = valtype;
+	}
 	sym->allowfree = 1;
 	sym->value = value;
 	sym->hash = compute_hash(name, namelen);
@@ -677,6 +682,16 @@ void tk_next(void) {
 			getchar();
 			if (consume_token("include")) {
 				tk = TK_INCLUDE;
+			} else if (consume_token("ifdef")) {
+				tk = TK_PIFDEF;
+			} else if (consume_token("ifndef")) {
+				tk = TK_PIFNDEF;
+			} else if (consume_token("if")) {
+				tk = TK_PIF;
+			} else if (consume_token("else")) {
+				tk = TK_PELSE;
+			} else if (consume_token("endif")) {
+				tk = TK_PENDIF;
 			} else {
 				error("Invalid/unimplemented preprocessor token");
 			}
@@ -1230,14 +1245,19 @@ void expression(uint8_t level) {
 	} else if (tk == TK_MUL) {
 		tk_next();
 		expression(TK_INC);
-		if (tkvaltype < T_PTR) {
+		if ((tkvaltype & T_MASK) == T_STR || (primarytype & T_INLINE_DATA)) {
+			tkvaltype = T_CHAR;
+		} else if (tkvaltype < T_PTR) {
 			error("Invalid dereference");
+		} else {
+			tkvaltype -= T_PTR;
 		}
-		tkvaltype -= T_PTR;
 		// Make sure IR_LOAD_CHAR, IR_LOAD_WORD, IR_LOAD_INT, IR_LOAD_LONG are in sequence.
 		// as well as T_CHAR, T_WORD, T_INT, and T_LONG.
 		if (tkvaltype >= T_CHAR && tkvaltype <= T_LONG) {
 			*++expr = tkvaltype + IR_LOAD_CHAR - T_CHAR;
+		} else if (tkvaltype > T_PTR) {
+			*++expr = IR_LOAD_INT;
 		} else if (tkvaltype == T_BOOL) {
 			*++expr = IR_LOAD_CHAR;
 		} else {
@@ -2010,6 +2030,57 @@ void postcompile(void) {
 	}
 }
 
+char *current_directory = NULL;
+char *_joined_paths_temp = NULL;
+char *joinpaths(const char *a, const char *b) {
+	size_t la = strlen(a);
+	size_t lb = strlen(b);
+	if (_joined_paths_temp != NULL) {
+		_free(_joined_paths_temp);
+	}
+	_joined_paths_temp = _malloc(la+lb+2);
+	memcpy(_joined_paths_temp, a, la);
+#ifdef PLATFORM_WINDOWS
+	_joined_paths_temp[la] = '\\';
+#else
+	_joined_paths_temp[la] = '/';
+#endif
+	memcpy(_joined_paths_temp+la+1, b, lb);
+	return _joined_paths_temp;
+}
+
+char *mallocdupstr(const char *a) {
+	char *b = _malloc(strlen(a)+1);
+	memcpy(b, a, strlen(a)+1);
+	return b;
+}
+
+char *_dirname_temp = NULL;
+char *dirname(const char *a) {
+	size_t la = strlen(a);
+	if (_dirname_temp != NULL) {
+		_free(_dirname_temp);
+	}
+	_dirname_temp = _malloc(la<4 ? 4 : la+1);
+	do {
+		la--;
+		if (a[la] == '/') {
+			memcpy(_dirname_temp, a, la);
+			_dirname_temp[la] = 0;
+			break;
+		}
+	} while (la > 0);
+	if (la <= 0) {
+#ifdef PLATFORM_WINDOWS
+		memcpy(_dirname_temp, "C:\\", 4);
+#else
+		_dirname_temp[0] = '/';
+		_dirname_temp[1] = 0;
+#endif
+	}
+	return _dirname_temp;
+}
+
 void compile(void) {
 	symbol *sym;
 	int argdepth, stackdepth, nargs;
@@ -2017,12 +2088,19 @@ void compile(void) {
 	uint8_t bt, ty;
 	int i;
 	bool can_define_globals = true;
+	if (current_directory == NULL) {
+		if ((current_directory = _malloc(2)) == NULL) {
+			error("Out of memory");
+		}
+		current_directory[0] = '/';
+		current_directory[1] = 0;
+	}
 	lno = 1;
 	tk_next();
 	while (tk) {
 		if (tk == TK_INCLUDE) {
 			unsigned int i, savedsrcoffset, savedsrclen, savedlno;
-			char *fname, *savedsrc, ch;
+			char *fname, *savedsrc, *saved_current_directory, ch;
 #ifdef PLATFORM_DESKTOP
 			FILE *fd;
 #else
@@ -2035,13 +2113,6 @@ void compile(void) {
 			tk_next();
 			i = srcoffset;
 			if (tk == TK_LT) {
-#ifdef PLATFORM_DESKTOP
-				error("#include <> not yet implemented on this platform");
-#else
-#ifndef BOS_BUILD
-				error("#include <> not yet implemented on this platform");
-#endif
-#endif
 				while ((ch = srcdata[srcoffset++]) != '>') {
 					if (ch == '\n') {
 						error("Unexpected line break");
@@ -2065,9 +2136,13 @@ void compile(void) {
 			savedsrcoffset = srcoffset;
 			savedsrclen = srclen;
 			savedlno = lno;
+			saved_current_directory = current_directory;
+			current_directory = mallocdupstr(joinpaths(current_directory, dirname(fname)));
 #ifdef PLATFORM_DESKTOP
-			if ((fd = fopen(fname, "r")) == NULL) {
-				error("Include file not found");
+			if ((fd = fopen(joinpaths(current_directory, fname), "r")) == NULL) {
+				if ((fd = fopen(fname, "r")) == NULL) {
+					error("Include file not found");
+				}
 			}
 			fseek(fd, 0, 2);
 			srclen = ftell(fd);
@@ -2080,8 +2155,18 @@ void compile(void) {
 			printf("Compiling included source file \"%s\"\n", fname);
 #else
 #ifdef BOS_BUILD
-			if ((fd = fs_OpenFile(fname)) == -1) {
-				error("Include file not found");
+			if (tk == TK_LT) {
+				if ((fd = sys_OpenFileInVar(fname, "/var/INCLUDE")) == -1) {
+					if ((fd = fs_OpenFile(fname)) == -1) {
+						error("Include file not found");
+					}
+				}
+			} else {
+				if ((fd = fs_OpenFile(joinpaths(current_directory, fname))) == -1) {
+					if ((fd = fs_OpenFile(fname)) == -1) {
+						error("Include file not found");
+					}
+				}
 			}
 			srcdata = fs_GetFDPtr(fd);
 			srclen = fs_GetFDLen(fd);
@@ -2110,13 +2195,24 @@ void compile(void) {
 			console_printline("Finished compiling included file");
 #endif
 #endif
+			_free(current_directory);
 			_free(srcdata);
 			_free(fname);
+			current_directory = saved_current_directory;
 			srcdata = savedsrc;
 			srcoffset = savedsrcoffset;
 			srclen = savedsrclen;
 			lno = savedlno + 1;
 			goto nexttoken;
+		// } else if (tk == TK_PIF) {
+			// tk_next();
+			// expression(TK_ASSIGN);
+			// if (!tkisconst) {
+				// error("Non-constant expression in preprocessor macro");
+			// }
+			// if (tkval) {
+				
+			// }
 		} else if (tk == TK_ENUM) {
 			tk_next();
 			if (tk != '{') {
